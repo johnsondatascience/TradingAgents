@@ -12,6 +12,7 @@ from tradingagents.dataflows.gexter import (
     GexterNotConfiguredError,
     GexterUnavailableError,
     fetch_document,
+    get_market_structure,
     gexter_configured,
     gexter_paths,
     render_document,
@@ -372,3 +373,46 @@ def test_trading_day_and_symbol_appear_in_the_heading():
     out = _render()
     assert "2026-08-28" in out
     assert "SPX" in out
+
+
+def test_entry_point_renders_for_a_complex_ticker(monkeypatch, gexter_config):
+    _patch_run(monkeypatch, _completed(json.dumps(OK_DOCUMENT)))
+    out = get_market_structure("^GSPC")
+    assert "apply to this instrument" in out
+    assert "compression" in out
+
+
+def test_entry_point_disclaims_for_an_unrelated_ticker(monkeypatch, gexter_config):
+    _patch_run(monkeypatch, _completed(json.dumps(OK_DOCUMENT)))
+    out = get_market_structure("NVDA")
+    assert "NOT a recommendation for NVDA" in out
+
+
+def test_entry_point_queries_the_mapped_symbol(monkeypatch, gexter_config):
+    recorder = {}
+    _patch_run(monkeypatch, _completed(json.dumps(OK_DOCUMENT)), recorder)
+    get_market_structure("^GSPC")
+    argv = recorder["argv"]
+    assert argv[argv.index("--symbols") + 1] == "SPX"
+
+
+def test_explicit_symbols_argument_overrides_the_map(monkeypatch, gexter_config):
+    recorder = {}
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["XSP"] = doc["symbols"].pop("SPX")
+    _patch_run(monkeypatch, _completed(json.dumps(doc)), recorder)
+    out = get_market_structure("^GSPC", symbols="XSP")
+    argv = recorder["argv"]
+    assert argv[argv.index("--symbols") + 1] == "XSP"
+    assert "compression" in out
+
+
+def test_entry_point_propagates_unavailability(monkeypatch, gexter_config):
+    _patch_run(monkeypatch, _completed(json.dumps({"schema_version": 1, "error": "db down"}), 1))
+    with pytest.raises(GexterUnavailableError):
+        get_market_structure("^GSPC")
+
+
+def test_entry_point_raises_when_unconfigured(no_gexter_config):
+    with pytest.raises(GexterNotConfiguredError):
+        get_market_structure("^GSPC")

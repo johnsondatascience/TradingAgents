@@ -350,3 +350,17 @@ def render_document(document, ticker, symbol, is_sp_complex) -> str:
             "interest has shifted the regime.*"
         )
     return "\n".join(lines)
+
+
+def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
+    """Index options-positioning context from GEXter, formatted for an LLM.
+
+    ``ticker`` is the instrument under analysis; it selects the GEXter symbol
+    and decides whether the directional bias is presented as applying to that
+    instrument or explicitly disclaimed. ``symbols`` overrides the mapping when
+    a caller wants a specific GEXter symbol.
+    """
+    mapped, is_sp_complex = resolve_gexter_symbol(ticker)
+    symbol = (symbols or mapped).strip().upper()
+    document = fetch_document(symbol, top_strikes=top_strikes)
+    return render_document(document, ticker, symbol, is_sp_complex)
