@@ -16,6 +16,7 @@ from tradingagents.agents.utils.fundamental_data_tools import (
 )
 from tradingagents.agents.utils.macro_data_tools import get_macro_indicators
 from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
+from tradingagents.agents.utils.market_structure_tools import get_market_structure
 from tradingagents.agents.utils.news_data_tools import (
     get_global_news,
     get_insider_transactions,
@@ -37,6 +38,7 @@ __all__ = [
     "get_global_news",
     "get_insider_transactions",
     "get_macro_indicators",
+    "get_market_structure",
     "get_prediction_markets",
     "get_verified_market_snapshot",
     "build_instrument_context",
