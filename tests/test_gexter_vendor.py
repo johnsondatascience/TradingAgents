@@ -405,6 +405,11 @@ def test_explicit_symbols_argument_overrides_the_map(monkeypatch, gexter_config)
     argv = recorder["argv"]
     assert argv[argv.index("--symbols") + 1] == "XSP"
     assert "compression" in out
+    # The header branch must remain unaffected by the symbol override: ticker ^GSPC
+    # is S&P complex, so the rendered output must say "apply to this instrument"
+    # and never say "NOT a recommendation".
+    assert "apply to this instrument" in out
+    assert "NOT a recommendation" not in out
 
 
 def test_entry_point_propagates_unavailability(monkeypatch, gexter_config):
