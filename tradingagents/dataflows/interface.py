@@ -92,11 +92,12 @@ VENDOR_LIST = [
     "gexter",
 ]
 
-# Optional enrichment categories. These add macro/event context to the news
-# analyst but are not core to a decision, so a vendor failure here degrades to a
-# sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
-# key, or a network blip should not crash an analysis over flavour data). Core
-# categories (prices, fundamentals, news) still raise so a broken primary is loud.
+# Optional enrichment categories. These add macro, event, and market-structure
+# context to the analyst that consumes them, but are not core to a decision, so
+# a vendor failure here degrades to a sentinel instead of aborting the run (a
+# bad LLM-supplied indicator, a missing key, or a network blip should not crash
+# an analysis over flavour data). Core categories (prices, fundamentals, news)
+# still raise so a broken primary is loud.
 OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "market_structure"}
 
 # Mapping of methods to their vendor-specific implementations
