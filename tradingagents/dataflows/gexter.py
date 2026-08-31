@@ -171,3 +171,182 @@ def fetch_document(symbol, top_strikes=None) -> dict:
             f"this vendor rather than parsing the document as-is."
         )
     return document
+
+
+def _fmt_number(value, suffix="", places=2):
+    """Format a number, or return None when it is absent.
+
+    No thousands separator: a strike renders as '5400', not '5,400'. The reader
+    is an LLM that may quote these back, and a comma invites a parse error.
+    """
+    if value is None:
+        return None
+    try:
+        text = f"{float(value):.{places}f}"
+    except (TypeError, ValueError):
+        return None
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text + suffix
+
+
+def _top_strikes_line(top_strikes):
+    """'gamma concentrated at 5450 (1.2Bn), 5400 (-0.85Bn)', or '' when absent.
+
+    GEXter reports top_strikes[].gex in raw dollars while the view's net_gex_bn
+    is in billions; convert so one line does not mix scales.
+    """
+    parts = []
+    for entry in (top_strikes or [])[:5]:
+        strike = _fmt_number((entry or {}).get("strike"))
+        raw = (entry or {}).get("gex")
+        if strike is None or raw is None:
+            continue
+        try:
+            billions = _fmt_number(float(raw) / 1e9)
+        except (TypeError, ValueError):
+            continue
+        parts.append(f"{strike} ({billions}Bn)" if billions is not None else strike)
+    return "gamma concentrated at " + ", ".join(parts) if parts else ""
+
+
+def _levels_line(levels):
+    """'flip 5400 - call wall 5450 - put wall 5350', omitting absent levels."""
+    parts = []
+    for key, label in (("flip", "flip"), ("call_wall", "call wall"), ("put_wall", "put wall")):
+        rendered = _fmt_number((levels or {}).get(key))
+        if rendered is not None:
+            parts.append(f"{label} {rendered}")
+    return "  ·  ".join(parts)
+
+
+def _view_lines(view, label):
+    """Render one regime view (stale or nowcast) as markdown lines."""
+    if not view:
+        return []
+    regime = view.get("regime") or "unknown"
+    strength = view.get("strength") or "unknown"
+    confidence = _fmt_number(
+        None if view.get("confidence") is None else float(view["confidence"]) * 100,
+        "%", places=0,
+    )
+    head = f"**{label}:** {regime} ({strength}"
+    head += f", confidence {confidence}" if confidence else ""
+    head += ")"
+    lines = [head]
+
+    stats = []
+    net = _fmt_number(view.get("net_gex_bn"))
+    if net is not None:
+        stats.append(f"net GEX {net}Bn")
+    levels = _levels_line(view.get("levels"))
+    if levels:
+        stats.append(levels)
+    if stats:
+        lines.append("  ·  ".join(stats))
+
+    bias = view.get("trade_bias")
+    risk = _fmt_number(view.get("risk_adjustment"))
+    if bias or risk:
+        detail = f"bias {bias or 'n/a'}"
+        if risk is not None:
+            detail += f"  ·  risk multiplier {risk}"
+        lines.append(detail)
+
+    structures = view.get("recommended_structures") or []
+    if structures:
+        lines.append("structures: " + ", ".join(str(s) for s in structures))
+
+    strikes = _top_strikes_line(view.get("top_strikes"))
+    if strikes:
+        lines.append(strikes)
+
+    concentration = _fmt_number(view.get("near_spot_concentration"), "%", places=1)
+    zero_dte = _fmt_number(view.get("zero_dte_proportion"), "%", places=1)
+    # These two are percentages, not fractions — GEXter divides then multiplies
+    # by 100 — so they carry a % suffix.
+    extras = []
+    if concentration is not None:
+        extras.append(f"near-spot concentration {concentration}")
+    if zero_dte is not None:
+        extras.append(f"0DTE share {zero_dte}")
+    if extras:
+        lines.append("  ·  ".join(extras))
+
+    interpretation = (view.get("interpretation") or "").strip()
+    if interpretation:
+        lines.append(interpretation)
+    return lines
+
+
+def _header(ticker, symbol, is_sp_complex, trading_day):
+    title = f"## S&P 500 Index Options Positioning — {symbol}, {trading_day}"
+    if is_sp_complex:
+        caveat = (
+            "This describes options positioning in the index you are analyzing. "
+            "The directional bias and risk multiplier below apply to this instrument."
+        )
+        if str(ticker).strip().upper() == "SPY":
+            caveat += (
+                " Note that gamma exposure is measured on SPX option chains, not "
+                "SPY's own; SPY tracks the same index but has a distinct chain."
+            )
+    else:
+        caveat = (
+            "INDEX-level market regime context. The directional bias and risk "
+            f"multiplier below describe the S&P complex, NOT a recommendation "
+            f"for {ticker}."
+        )
+    return [title, "", caveat, ""]
+
+
+def render_document(document, ticker, symbol, is_sp_complex) -> str:
+    """Render a GEXter document as markdown for an LLM reader."""
+    trading_day = document.get("trading_day") or "unknown date"
+    lines = _header(ticker, symbol, is_sp_complex, trading_day)
+
+    entry = (document.get("symbols") or {}).get(symbol)
+    if not entry:
+        lines.append(
+            f"Positioning for {symbol} is unavailable: GEXter returned no entry "
+            "for it. Do not estimate or fabricate values."
+        )
+        return "\n".join(lines)
+
+    if entry.get("status") != "ok":
+        reason = entry.get("reason") or "no reason given"
+        lines.append(f"Positioning for {symbol} is unavailable ({reason}).")
+        return "\n".join(lines)
+
+    spot = _fmt_number(entry.get("spot"))
+    asof = entry.get("asof")
+    context = []
+    if spot:
+        context.append(f"spot ~{spot}")
+    if asof:
+        context.append(f"as of {asof}")
+    if context:
+        lines.append("  ·  ".join(context))
+        lines.append("")
+
+    nowcast = entry.get("nowcast")
+    if nowcast:
+        lines += _view_lines(nowcast, "Real-time regime")
+        lines.append("")
+        lines += _view_lines(entry.get("stale"), "Prior-close regime")
+    else:
+        lines += _view_lines(entry.get("stale"), "Regime")
+        lines.append("")
+        lines.append(
+            "GEXter's real-time nowcast is unavailable (its model artifact is "
+            "missing), so this reflects prior-close open interest rather than "
+            "live positioning."
+        )
+
+    if entry.get("regime_divergence"):
+        lines.append("")
+        lines.append(
+            "*The real-time and prior-close regimes diverge: intraday open "
+            "interest has shifted the regime.*"
+        )
+    return "\n".join(lines)

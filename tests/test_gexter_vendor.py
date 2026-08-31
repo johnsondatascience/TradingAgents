@@ -14,6 +14,7 @@ from tradingagents.dataflows.gexter import (
     fetch_document,
     gexter_configured,
     gexter_paths,
+    render_document,
     resolve_gexter_symbol,
 )
 
@@ -255,3 +256,119 @@ def test_unavailable_is_a_vendor_error_not_a_crash(monkeypatch, gexter_config):
     from tradingagents.dataflows.errors import VendorError
 
     assert issubclass(GexterUnavailableError, VendorError)
+
+
+def _render(document=None, ticker="^GSPC", symbol="SPX", is_complex=True):
+    return render_document(document or OK_DOCUMENT, ticker, symbol, is_complex)
+
+
+def test_render_includes_regime_and_levels():
+    out = _render()
+    assert "compression" in out
+    assert "5400" in out            # flip
+    assert "5450" in out            # call wall
+    assert "sell_premium" in out
+
+
+def test_sp_complex_header_says_it_applies_to_this_instrument():
+    out = _render(ticker="^GSPC", is_complex=True)
+    assert "apply to this instrument" in out
+    assert "NOT a recommendation" not in out
+
+
+def test_non_complex_header_disclaims_and_names_the_ticker():
+    out = _render(ticker="NVDA", is_complex=False)
+    assert "NOT a recommendation for NVDA" in out
+    assert "apply to this instrument" not in out
+
+
+def test_spy_states_measurement_is_on_spx_chains():
+    out = _render(ticker="SPY", symbol="SPX", is_complex=True)
+    assert "SPX option chains" in out
+    assert "apply to this instrument" in out   # SPY is still S&P complex
+
+
+def test_non_spy_complex_ticker_has_no_chain_caveat():
+    assert "SPX option chains" not in _render(ticker="^GSPC", is_complex=True)
+
+
+def test_divergence_line_renders_when_regimes_differ():
+    out = _render()
+    assert "diverge" in out.lower()
+
+
+def test_no_divergence_line_when_regimes_match():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"]["regime_divergence"] = False
+    assert "diverge" not in _render(doc).lower()
+
+
+def test_missing_model_renders_stale_and_says_nowcast_unavailable():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["model_available"] = False
+    doc["symbols"]["SPX"]["nowcast"] = None
+    doc["symbols"]["SPX"]["regime_divergence"] = None
+    out = _render(doc)
+    assert "compression" in out          # the stale view survives
+    assert "real-time" in out.lower()
+    assert "transition" not in out       # no fabricated nowcast
+
+
+def test_no_data_symbol_renders_reason_not_an_error():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"] = {"status": "no_data", "reason": "no valid spot (data gap)"}
+    out = _render(doc)
+    assert "no valid spot (data gap)" in out
+
+
+def test_missing_symbol_entry_renders_unavailable():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"] = {}
+    assert "unavailable" in _render(doc).lower()
+
+
+def test_null_levels_are_omitted_not_printed_as_none():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"]["stale"]["levels"] = {
+        "flip": None, "call_wall": None, "put_wall": None,
+    }
+    doc["symbols"]["SPX"]["nowcast"]["levels"] = {
+        "flip": None, "call_wall": None, "put_wall": None,
+    }
+    out = _render(doc)
+    assert "None" not in out
+    assert "null" not in out
+
+
+def test_percentage_fields_render_with_a_percent_sign():
+    out = _render()
+    assert "21.4%" in out
+    assert "44.2%" in out
+
+
+def test_strike_numbers_carry_no_thousands_separator():
+    # An LLM may quote these back; "5,400" invites a parse error.
+    out = _render()
+    assert "5400" in out
+    assert "5,400" not in out
+
+
+def test_top_strikes_render_converted_to_billions():
+    # GEXter reports top_strikes[].gex in raw dollars (1.2e9), while
+    # net_gex_bn is already in billions; one line must not mix scales.
+    out = _render()
+    assert "1.2Bn" in out
+    assert "1200000000" not in out
+
+
+def test_absent_top_strikes_render_nothing():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"]["stale"]["top_strikes"] = []
+    doc["symbols"]["SPX"]["nowcast"]["top_strikes"] = []
+    assert "gamma concentrated" not in _render(doc)
+
+
+def test_trading_day_and_symbol_appear_in_the_heading():
+    out = _render()
+    assert "2026-08-28" in out
+    assert "SPX" in out
