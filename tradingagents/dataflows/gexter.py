@@ -15,8 +15,10 @@ The feature is inert unless TRADINGAGENTS_GEXTER_REPO and
 TRADINGAGENTS_GEXTER_PYTHON are configured: the tool is not bound and no
 subprocess is spawned.
 """
+import json
 import logging
 import os
+import subprocess
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError
@@ -116,3 +118,56 @@ def resolve_gexter_symbol(ticker) -> tuple[str, bool]:
     if key in SP_COMPLEX_TICKERS:
         return SP_COMPLEX_TICKERS[key], True
     return DEFAULT_GEXTER_SYMBOL, False
+
+
+def _excerpt(text, limit=300):
+    """A short, single-line sample of process output for an error message."""
+    flat = " ".join((text or "").split())
+    return flat[:limit] + ("..." if len(flat) > limit else "")
+
+
+def fetch_document(symbol, top_strikes=None) -> dict:
+    """Run GEXter's CLI and return its parsed, version-checked document.
+
+    Raises GexterUnavailableError for every failure mode, so the router's
+    optional-category handling degrades to a sentinel rather than aborting.
+    """
+    repo, python, timeout = gexter_paths()
+    argv = [python, os.path.join(repo, GEXTER_CLI), "--json", "--symbols", symbol]
+    if top_strikes is not None:
+        argv += ["--top-strikes", str(top_strikes)]
+
+    try:
+        completed = subprocess.run(
+            argv, cwd=repo, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GexterUnavailableError(
+            f"GEXter timed out after {timeout}s. Its Postgres may be unreachable."
+        ) from exc
+    except OSError as exc:
+        raise GexterUnavailableError(f"Could not run GEXter: {exc}") from exc
+
+    try:
+        document = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise GexterUnavailableError(
+            f"GEXter stdout was not JSON (exit {completed.returncode}): "
+            f"{_excerpt(completed.stdout)!r}"
+        ) from exc
+
+    if not isinstance(document, dict):
+        raise GexterUnavailableError("GEXter returned a JSON value that is not an object.")
+
+    # GEXter emits a parseable error document with exit 1 on total failure.
+    if "error" in document:
+        raise GexterUnavailableError(f"GEXter reported: {document['error']}")
+
+    version = document.get("schema_version")
+    if version != SUPPORTED_SCHEMA_VERSION:
+        raise GexterUnavailableError(
+            f"GEXter returned schema_version {version!r}; this vendor understands "
+            f"only {SUPPORTED_SCHEMA_VERSION}. Its contract has changed — update "
+            f"this vendor rather than parsing the document as-is."
+        )
+    return document
