@@ -19,6 +19,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
+    # Fork-local (GEXter): seconds to wait for the market-structure subprocess.
+    # Routed through _coerce like every other numeric key so a malformed value
+    # names the env var instead of raising a bare int() ValueError at import.
+    "TRADINGAGENTS_GEXTER_TIMEOUT":       "gexter_timeout",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
@@ -79,7 +83,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # GEXter's own venv — the system interpreter lacks its dependencies.
     "gexter_repo": os.getenv("TRADINGAGENTS_GEXTER_REPO"),
     "gexter_python": os.getenv("TRADINGAGENTS_GEXTER_PYTHON"),
-    "gexter_timeout": int(os.getenv("TRADINGAGENTS_GEXTER_TIMEOUT", "120")),
+    # Seconds. Overridden by TRADINGAGENTS_GEXTER_TIMEOUT via _ENV_OVERRIDES.
+    "gexter_timeout": 120,
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
