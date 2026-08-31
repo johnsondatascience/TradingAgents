@@ -48,9 +48,33 @@ def test_tool_wrapper_routes_through_the_vendor(monkeypatch):
     monkeypatch.setitem(
         interface.VENDOR_METHODS["get_market_structure"],
         "gexter",
-        lambda ticker, symbols=None, top_strikes=None: f"rendered:{ticker}:{symbols}",
+        lambda ticker, symbols=None, top_strikes=None: (
+            f"rendered:{ticker}:{symbols}:{top_strikes}"
+        ),
     )
-    assert get_market_structure.invoke({"ticker": "^GSPC"}) == "rendered:^GSPC:None"
+    # Distinct, non-None values for both optional arguments: route_to_vendor
+    # forwards them positionally, so equal placeholders would let a
+    # symbols/top_strikes transposition through unnoticed.
+    result = get_market_structure.invoke(
+        {"ticker": "^GSPC", "symbols": "XSP", "top_strikes": 3}
+    )
+    assert result == "rendered:^GSPC:XSP:3"
+
+
+def test_tool_wrapper_omits_optional_arguments_when_unset(monkeypatch):
+    from tradingagents.agents.utils.market_structure_tools import get_market_structure
+
+    monkeypatch.setitem(
+        interface.VENDOR_METHODS["get_market_structure"],
+        "gexter",
+        lambda ticker, symbols=None, top_strikes=None: (
+            f"rendered:{ticker}:{symbols}:{top_strikes}"
+        ),
+    )
+    assert (
+        get_market_structure.invoke({"ticker": "^GSPC"})
+        == "rendered:^GSPC:None:None"
+    )
 
 
 def test_tool_is_reexported_from_agent_utils():

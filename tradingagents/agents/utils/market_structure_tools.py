@@ -14,7 +14,9 @@ def get_market_structure(
     ],
     symbols: Annotated[
         str | None,
-        "Override the GEXter symbol (SPX, XSP, ES); omit to derive it from the ticker.",
+        "A SINGLE GEXter symbol (SPX, XSP or ES) overriding the one derived "
+        "from the ticker. Not a comma-separated list: only one symbol is "
+        "rendered. Omit to derive it from the ticker.",
     ] = None,
     top_strikes: Annotated[
         int | None, "How many strikes by |GEX| to include; omit for a default of 10"
@@ -33,9 +35,15 @@ def get_market_structure(
     ticker it is market-regime context only. Uses the configured
     market_structure vendor.
 
+    The report covers GEXter's most recently collected trading day, which is
+    not necessarily the date under analysis: this tool takes no date. The
+    rendered header states the day it covers; if that differs from the date
+    you are analyzing, treat the positioning as background only and do not
+    apply it to that date.
+
     Args:
         ticker (str): The instrument under analysis
-        symbols (str): Optional GEXter symbol override
+        symbols (str): Optional override, a single GEXter symbol (not a list)
         top_strikes (int): Max strikes to include; omit for a default of 10
 
     Returns:

@@ -16,14 +16,11 @@ TRADINGAGENTS_GEXTER_PYTHON are configured: the tool is not bound and no
 subprocess is spawned.
 """
 import json
-import logging
 import os
 import subprocess
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError
-
-logger = logging.getLogger(__name__)
 
 # The contract version this vendor understands. GEXter's spec states that
 # additive changes keep the version at 1 while a removal or retype bumps it, so
@@ -102,7 +99,11 @@ def gexter_configured() -> bool:
     """
     try:
         gexter_paths()
-    except GexterNotConfiguredError:
+    except (GexterNotConfiguredError, TypeError, ValueError):
+        # Called from the market analyst node body, outside route_to_vendor,
+        # so a raise here aborts the whole graph run instead of degrading to
+        # a sentinel. A malformed gexter_timeout (int() on 'abc') must read
+        # as 'not configured' rather than crash the run.
         return False
     return True
 
@@ -139,7 +140,12 @@ def fetch_document(symbol, top_strikes=None) -> dict:
 
     try:
         completed = subprocess.run(
-            argv, cwd=repo, capture_output=True, text=True, timeout=timeout
+            # errors="replace": text=True decodes with the platform encoding,
+            # so a traceback carrying a non-decodable byte would otherwise
+            # raise UnicodeDecodeError out of subprocess.run itself — an
+            # untyped escape from a function that promises to degrade.
+            argv, cwd=repo, capture_output=True, text=True, errors="replace",
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise GexterUnavailableError(
@@ -151,10 +157,18 @@ def fetch_document(symbol, top_strikes=None) -> dict:
     try:
         document = json.loads(completed.stdout)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise GexterUnavailableError(
+        # stderr is the diagnostic channel by design: GEXter routes its notices
+        # there in --json mode, and the likeliest misconfiguration — gexter_python
+        # pointing at an interpreter without GEXter's dependencies — dies on
+        # 'import psycopg2' with an empty stdout and the traceback on stderr.
+        detail = (
             f"GEXter stdout was not JSON (exit {completed.returncode}): "
             f"{_excerpt(completed.stdout)!r}"
-        ) from exc
+        )
+        stderr = _excerpt(completed.stderr)
+        if stderr:
+            detail += f"; stderr: {stderr!r}"
+        raise GexterUnavailableError(detail) from exc
 
     if not isinstance(document, dict):
         raise GexterUnavailableError("GEXter returned a JSON value that is not an object.")
@@ -190,14 +204,31 @@ def _fmt_number(value, suffix="", places=2):
     return text + suffix
 
 
+def _fmt_fraction_pct(value):
+    """A 0..1 fraction as a whole-number percent ('72%'), or None when absent.
+
+    GEXter reports ``confidence`` and ``quality.modeled_gamma_frac`` as
+    fractions; both read as percentages to a human or an LLM.
+    """
+    if value is None:
+        return None
+    try:
+        return _fmt_number(float(value) * 100, "%", places=0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _top_strikes_line(top_strikes):
     """'gamma concentrated at 5450 (1.2Bn), 5400 (-0.85Bn)', or '' when absent.
 
     GEXter reports top_strikes[].gex in raw dollars while the view's net_gex_bn
     is in billions; convert so one line does not mix scales.
+
+    Uncapped: GEXter already bounds the list with --top-strikes (default 10),
+    so a cap here would render fewer strikes than the tool documents.
     """
     parts = []
-    for entry in (top_strikes or [])[:5]:
+    for entry in top_strikes or []:
         strike = _fmt_number((entry or {}).get("strike"))
         raw = (entry or {}).get("gex")
         if strike is None or raw is None:
@@ -226,10 +257,7 @@ def _view_lines(view, label):
         return []
     regime = view.get("regime") or "unknown"
     strength = view.get("strength") or "unknown"
-    confidence = _fmt_number(
-        None if view.get("confidence") is None else float(view["confidence"]) * 100,
-        "%", places=0,
-    )
+    confidence = _fmt_fraction_pct(view.get("confidence"))
     head = f"**{label}:** {regime} ({strength}"
     head += f", confidence {confidence}" if confidence else ""
     head += ")"
@@ -297,7 +325,17 @@ def _header(ticker, symbol, is_sp_complex, trading_day):
             f"multiplier below describe the S&P complex, NOT a recommendation "
             f"for {ticker}."
         )
-    return [title, "", caveat, ""]
+    # The tool takes no date and GEXter reports its latest collected trading
+    # day, which need not be the date under analysis: a backtest run would see
+    # a future date, a live run on a missed collection day a stale one.
+    # Passing the run date through is deferred, so the output must say so.
+    freshness = (
+        f"The date above ({trading_day}) is GEXter's most recently collected "
+        "trading day, not necessarily the date you are analyzing. If the two "
+        "differ, treat this positioning as background only and do not apply it "
+        "to the date under analysis."
+    )
+    return [title, "", caveat, "", freshness, ""]
 
 
 def render_document(document, ticker, symbol, is_sp_complex) -> str:
@@ -325,8 +363,21 @@ def render_document(document, ticker, symbol, is_sp_complex) -> str:
         context.append(f"spot ~{spot}")
     if asof:
         context.append(f"as of {asof}")
+    # GEXter's own readout prints these caveats; dropping them would present
+    # provisional levels as bare, unqualified numbers.
+    quality = entry.get("quality") or {}
+    modeled = _fmt_fraction_pct(quality.get("modeled_gamma_frac"))
+    if modeled:
+        context.append(f"gamma weight modeled {modeled}")
     if context:
         lines.append("  ·  ".join(context))
+        lines.append("")
+    if quality.get("pre_1300"):
+        lines.append(
+            "*Before 13:00 ET GEXter flags the flip strike and put wall as "
+            "low-confidence: intraday open interest is still filling in. Treat "
+            "those two levels as provisional.*"
+        )
         lines.append("")
 
     nowcast = entry.get("nowcast")
@@ -334,6 +385,13 @@ def render_document(document, ticker, symbol, is_sp_complex) -> str:
         lines += _view_lines(nowcast, "Real-time regime")
         lines.append("")
         lines += _view_lines(entry.get("stale"), "Prior-close regime")
+        lines.append("")
+        lines.append(
+            "The real-time regime is the operative view: it reflects today's "
+            "intraday open interest. The prior-close regime is shown for "
+            "contrast only — where the two disagree, prefer the real-time bias "
+            "and risk multiplier."
+        )
     else:
         lines += _view_lines(entry.get("stale"), "Regime")
         lines.append("")
@@ -357,8 +415,9 @@ def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
 
     ``ticker`` is the instrument under analysis; it selects the GEXter symbol
     and decides whether the directional bias is presented as applying to that
-    instrument or explicitly disclaimed. ``symbols`` overrides the mapping when
-    a caller wants a specific GEXter symbol.
+    instrument or explicitly disclaimed. ``symbols`` overrides the mapping with
+    a SINGLE GEXter symbol; GEXter's CLI accepts a comma-separated list, but the
+    renderer looks up exactly one key, so a list would fetch data and discard it.
     """
     mapped, is_sp_complex = resolve_gexter_symbol(ticker)
     symbol = (symbols or mapped).strip().upper()

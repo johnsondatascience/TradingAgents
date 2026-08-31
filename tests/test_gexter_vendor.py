@@ -78,6 +78,24 @@ def test_gexter_configured_false_when_unset(no_gexter_config):
     assert gexter_configured() is False
 
 
+def test_gexter_configured_false_for_a_malformed_timeout(gexter_config):
+    """A bad timeout must read as "not configured", never abort the run.
+
+    gexter_configured() is called in the market analyst node body, outside
+    route_to_vendor, so a raise there is not converted into a sentinel: it
+    aborts the whole graph run.
+    """
+    gexter_config["gexter_timeout"] = "abc"
+    set_config(gexter_config)
+    assert gexter_configured() is False
+
+
+def test_gexter_paths_accepts_a_numeric_string_timeout(gexter_config):
+    gexter_config["gexter_timeout"] = "45"
+    set_config(gexter_config)
+    assert gexter_paths()[2] == 45
+
+
 @pytest.mark.parametrize(
     "ticker,expected",
     [
@@ -204,6 +222,9 @@ def test_fetch_document_invokes_the_cli_correctly(monkeypatch, gexter_config):
     assert "--top-strikes" not in argv        # omitted so GEXter's default applies
     assert recorder["kwargs"]["cwd"] == gexter_config["gexter_repo"]
     assert recorder["kwargs"]["timeout"] == 45
+    # text=True decodes with the platform encoding; errors="replace" keeps a
+    # non-decodable byte in a traceback from escaping as UnicodeDecodeError.
+    assert recorder["kwargs"]["errors"] == "replace"
 
 
 def test_fetch_document_passes_top_strikes_when_given(monkeypatch, gexter_config):
@@ -225,6 +246,29 @@ def test_nonzero_exit_with_unparseable_stdout_raises(monkeypatch, gexter_config)
     _patch_run(monkeypatch, _completed("Traceback (most recent call last):", 1, "boom"))
     with pytest.raises(GexterUnavailableError):
         fetch_document("SPX")
+
+
+def test_unparseable_stdout_error_carries_the_stderr_excerpt(monkeypatch, gexter_config):
+    """The likeliest misconfiguration is diagnosable only from stderr.
+
+    Pointing gexter_python at the wrong interpreter kills GEXter on
+    `import psycopg2` before its own error handling: stdout is empty and the
+    traceback goes to stderr. Without it the user sees only
+    "GEXter stdout was not JSON (exit 1): ''".
+    """
+    _patch_run(
+        monkeypatch,
+        _completed("", 1, "ModuleNotFoundError: No module named 'psycopg2'"),
+    )
+    with pytest.raises(GexterUnavailableError, match="psycopg2"):
+        fetch_document("SPX")
+
+
+def test_empty_stderr_adds_no_noise_to_the_error(monkeypatch, gexter_config):
+    _patch_run(monkeypatch, _completed("not json", 1, ""))
+    with pytest.raises(GexterUnavailableError) as excinfo:
+        fetch_document("SPX")
+    assert "stderr" not in str(excinfo.value)
 
 
 def test_unparseable_stdout_raises(monkeypatch, gexter_config):
@@ -269,6 +313,11 @@ def test_render_includes_regime_and_levels():
     assert "5400" in out            # flip
     assert "5450" in out            # call wall
     assert "sell_premium" in out
+    # By value: confidence is a 0..1 fraction rendered as a percent, so a
+    # dropped "* 100" would render "confidence 1%" and pass a mere-substring
+    # check. 0.72 -> 72%, 0.51 -> 51%.
+    assert "confidence 72%" in out
+    assert "confidence 51%" in out
 
 
 def test_sp_complex_header_says_it_applies_to_this_instrument():
@@ -421,3 +470,95 @@ def test_entry_point_propagates_unavailability(monkeypatch, gexter_config):
 def test_entry_point_raises_when_unconfigured(no_gexter_config):
     with pytest.raises(GexterNotConfiguredError):
         get_market_structure("^GSPC")
+
+
+PRECEDENCE = "The real-time regime is the operative view"
+
+
+def test_precedence_sentence_names_the_operative_view_when_a_nowcast_exists():
+    """Two regime views can disagree; the header speaks of one bias.
+
+    Without a stated precedence a model sizing a position could justify either
+    risk multiplier (0.75 nowcast vs 1 prior-close in this document).
+    """
+    out = _render()
+    assert PRECEDENCE in out
+    assert "prefer the real-time bias" in out
+
+
+def test_no_precedence_sentence_when_there_is_no_nowcast_to_prefer():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["model_available"] = False
+    doc["symbols"]["SPX"]["nowcast"] = None
+    out = _render(doc)
+    assert PRECEDENCE not in out
+    assert "Prior-close regime" not in out   # the sole view is just "Regime"
+
+
+FRESHNESS = "most recently collected"
+
+
+@pytest.mark.parametrize("ticker,is_complex", [("^GSPC", True), ("NVDA", False)])
+def test_header_flags_that_the_date_may_not_be_the_analysis_date(ticker, is_complex):
+    """Silent look-ahead / staleness guard.
+
+    The tool takes no date and GEXter reports its latest collected trading day,
+    so a backtest run on 2026-06-15 would otherwise read "SPX, 2026-08-28" as if
+    it were the analysis date.
+    """
+    out = _render(ticker=ticker, is_complex=is_complex)
+    assert FRESHNESS in out
+    assert "2026-08-28" in out
+    assert "background only" in out
+
+
+def test_pre_1300_renders_the_low_confidence_note():
+    """GEXter's own readout prints this caveat; stripping it presents the flip
+    strike and put wall as bare numbers on a morning run."""
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"]["quality"]["pre_1300"] = True
+    out = _render(doc)
+    assert "Before 13:00 ET" in out
+    assert "low-confidence" in out
+
+
+def test_pre_1300_note_is_absent_after_1300():
+    # OK_DOCUMENT carries pre_1300: False.
+    assert "13:00" not in _render()
+
+
+def test_modeled_gamma_fraction_renders_as_a_confidence_stat():
+    out = _render()
+    assert "gamma weight modeled 83%" in out    # 0.83
+
+
+def test_missing_quality_block_renders_without_error():
+    doc = copy.deepcopy(OK_DOCUMENT)
+    doc["symbols"]["SPX"].pop("quality")
+    out = _render(doc)
+    assert "gamma weight modeled" not in out
+    assert "13:00" not in out
+    assert "compression" in out
+
+
+def test_top_strikes_are_not_capped_below_the_documented_default():
+    """The tool documents a default of 10; a [:5] cap silently rendered five.
+
+    GEXter already bounds this list with --top-strikes, so the renderer must not
+    bound it again.
+    """
+    doc = copy.deepcopy(OK_DOCUMENT)
+    strikes = [
+        {"strike": 5400.0 + 10 * i, "gex": (i + 1) * 1e8} for i in range(8)
+    ]
+    doc["symbols"]["SPX"]["nowcast"]["top_strikes"] = strikes
+    out = _render(doc)
+
+    line = next(
+        text
+        for text in out.splitlines()
+        if text.startswith("gamma concentrated at") and "5470" in text
+    )
+    # By count, not by membership: 5400/5450 also appear as levels, so a
+    # surviving [:5] cap could still satisfy a "strike in out" check.
+    assert line.count("Bn)") == len(strikes)
