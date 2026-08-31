@@ -73,6 +73,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
+    # GEXter integration (optional, fork-local). Both paths default to None, so
+    # the market-structure tool is not bound and no subprocess is ever spawned
+    # unless explicitly configured. gexter_python must be the interpreter from
+    # GEXter's own venv — the system interpreter lacks its dependencies.
+    "gexter_repo": os.getenv("TRADINGAGENTS_GEXTER_REPO"),
+    "gexter_python": os.getenv("TRADINGAGENTS_GEXTER_PYTHON"),
+    "gexter_timeout": int(os.getenv("TRADINGAGENTS_GEXTER_TIMEOUT", "120")),
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
@@ -137,6 +144,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+        "market_structure": "gexter",        # Options: gexter (needs TRADINGAGENTS_GEXTER_* paths)
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
