@@ -527,10 +527,31 @@ def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
     instrument or explicitly disclaimed. ``symbols`` overrides the mapping with
     a SINGLE GEXter symbol; GEXter's CLI accepts a comma-separated list, but the
     renderer looks up exactly one key, so a list would fetch data and discard it.
+
+    Takes no date from the model, and is bounded anyway: the run's date and
+    cutoff come from config, recorded by the analyst node before the model
+    could reach this. Without that the node's careful --date/--cutoff bounding
+    was undone by the first tool call, and a replay run read positioning from
+    after the date under analysis -- through the one door the model controls.
     """
     mapped, is_sp_complex = resolve_gexter_symbol(ticker)
     symbol = (symbols or mapped).strip().upper()
-    document = fetch_document(symbol, top_strikes=top_strikes)
+    config = get_config()
+    trade_date = config.get("gexter_trade_date")
+    document = fetch_document(
+        symbol,
+        top_strikes=top_strikes,
+        trade_date=trade_date,
+        cutoff=config.get("gexter_cutoff"),
+        candidates=bool(config.get("gexter_candidates", True)),
+        dte_max=config.get("gexter_dte_max", 2),
+    )
+    entry = (document.get("symbols") or {}).get(symbol)
+    if isinstance(entry, dict):
+        # The same gate the node applies. Two paths to one document that gate
+        # its candidates differently is how the model ends up reasoning about
+        # a structure the node had already ruled untradeable.
+        document["symbols"][symbol] = apply_freshness_gate(entry, trade_date)
     return render_document(document, ticker, symbol, is_sp_complex)
 
 
@@ -582,12 +603,19 @@ def apply_freshness_gate(entry, trade_date, now=None, max_age=None) -> dict:
             continue
         try:
             stamp = datetime.fromisoformat(quoted)
+            age = (now - stamp).total_seconds()
         except (TypeError, ValueError):
             # An unreadable stamp is not evidence of staleness. Suppressing
             # on it would silently drop tradeable structures over a format
             # change rather than an age problem.
+            #
+            # The subtraction is inside the try because a stamp with no UTC
+            # offset is unreadable in the same sense: fromisoformat accepts
+            # it and then the subtraction raises TypeError, which is caught
+            # by neither this clause nor fetch_market_structure's, so an
+            # optional-context vendor would abort the graph. Assuming a zone
+            # instead would be a guess that can be hours wrong either way.
             continue
-        age = (now - stamp).total_seconds()
         oldest = age if oldest is None else max(oldest, age)
 
     if oldest is not None and oldest > max_age:

@@ -799,3 +799,75 @@ def test_a_genuine_replay_is_still_not_gated(gexter_config):
         _entry(datetime(2026, 6, 10, 13, 45, tzinfo=_ET_OFFSET)),
         trade_date="2026-06-10", now=utc_now)
     assert len(gated["candidates"]) == 1
+
+
+def _capture_fetch_kwargs(monkeypatch):
+    """Capture what the LLM-facing tool asks fetch_document for."""
+    seen = {}
+
+    def fake_fetch(symbol, **kwargs):
+        seen.update(kwargs)
+        seen["symbol"] = symbol
+        return json.loads(_MINIMAL_DOC)
+
+    monkeypatch.setattr("tradingagents.dataflows.gexter.fetch_document", fake_fetch)
+    return seen
+
+
+def test_the_tool_bounds_its_fetch_by_the_run_date(gexter_config, monkeypatch):
+    """The tool is the door the model walks through, and it was unbounded.
+
+    fetch_market_structure carefully passes --date and --cutoff, but the
+    moment the model called get_market_structure it got GEXter's latest
+    collected day instead. On a replay the two paths disagreed inside one run
+    and the backtest read positioning from after the date under analysis.
+    """
+    gexter_config["gexter_trade_date"] = "2026-06-02"
+    gexter_config["gexter_cutoff"] = "11:00"
+    set_config(gexter_config)
+    seen = _capture_fetch_kwargs(monkeypatch)
+    get_market_structure("^GSPC")
+    assert seen["trade_date"] == "2026-06-02"
+    assert seen["cutoff"] == "11:00"
+
+
+def test_the_tool_is_unbounded_only_when_no_run_date_is_recorded(
+        gexter_config, monkeypatch):
+    # Called outside a graph run there is no date to honour, and GEXter's own
+    # default (its latest collected day) is the right answer.
+    seen = _capture_fetch_kwargs(monkeypatch)
+    get_market_structure("^GSPC")
+    assert seen["trade_date"] is None
+
+
+def _entry_quoted(stamp):
+    return {"candidates": [{"candidate_id": "SPX_x", "quoted_asof": stamp}],
+            "candidates_suppressed_reason": None}
+
+
+def test_a_naive_quoted_asof_does_not_abort_the_graph(gexter_config):
+    """fromisoformat accepts a stamp with no offset; the subtraction does not.
+
+    The TypeError lands outside the except that guards the parse, and outside
+    fetch_market_structure's (VendorError, ValueError, OSError) too -- so an
+    optional-context vendor takes the whole run down, which is exactly what
+    the "never raises" contract on that path exists to prevent.
+    """
+    from tradingagents.dataflows.gexter import apply_freshness_gate
+
+    entry = _entry_quoted("2026-08-31T13:45:00")     # no offset
+    gated = apply_freshness_gate(entry, trade_date=None)
+    # Treated like any other unreadable stamp: not evidence of staleness, so
+    # the candidates stand rather than being silently dropped.
+    assert gated["candidates"] == entry["candidates"]
+
+
+def test_an_aware_quoted_asof_still_suppresses_when_stale(gexter_config):
+    # Guards the guard: if the gate stopped firing at all, the test above
+    # would pass for the wrong reason.
+    from tradingagents.dataflows.gexter import apply_freshness_gate
+
+    gated = apply_freshness_gate(_entry_quoted("2020-01-02T13:45:00-05:00"),
+                                 trade_date=None, max_age=1800)
+    assert gated["candidates"] == []
+    assert "old" in gated["candidates_suppressed_reason"]

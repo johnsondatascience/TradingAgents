@@ -8,7 +8,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
-from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.config import get_config, set_config
 from tradingagents.dataflows.errors import VendorError
 from tradingagents.dataflows.gexter import (
     apply_freshness_gate,
@@ -72,6 +72,15 @@ def fetch_market_structure(state):
     Never raises. Market structure is optional context, and a GEXter outage
     must degrade the run rather than abort the graph.
     """
+    # Once per run, not once per node entry. The tools node edges back to this
+    # analyst, so the body re-runs after every tool batch -- three or four
+    # times for one report. Keyed on presence rather than truth because the
+    # two absences differ: a key that is not there yet has never been tried,
+    # while a key holding None was tried and failed, and retrying that costs
+    # another full gexter_timeout before returning the same None. Presence is
+    # a safe signal because create_initial_state does not seed the key.
+    if "market_structure" in state:
+        return state["market_structure"]
     if not gexter_configured():
         return None
     symbol, is_sp_complex = resolve_gexter_symbol(state.get("company_of_interest"))
@@ -80,6 +89,13 @@ def fetch_market_structure(state):
         # worth a subprocess on a path that never had one.
         return None
     config = get_config()
+    # The LLM-facing tool has no state to read the run's date from, so record
+    # it where the tool can. Ordering is structural rather than hopeful: the
+    # tool is only bound inside this node, and this runs before the model does.
+    # Via set_config, not by mutating the mapping: get_config hands back a
+    # deepcopy, so assigning into it writes to a throwaway and the tool would
+    # go on fetching unbounded with nothing to show that it had.
+    set_config({"gexter_trade_date": state.get("trade_date")})
     try:
         document = fetch_document(
             symbol=symbol,
