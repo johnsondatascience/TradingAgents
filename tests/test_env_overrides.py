@@ -26,6 +26,7 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["backend_url"] is None
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
+    assert dc.DEFAULT_CONFIG["gexter_timeout"] == 120
 
 
 def test_string_overrides(monkeypatch):
@@ -98,6 +99,24 @@ def test_empty_env_value_is_passthrough(monkeypatch):
     )
     assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
+
+
+def test_gexter_timeout_is_coerced_like_every_other_int(monkeypatch):
+    """Fork-local key, same mechanism: a plain string in .env still works."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_GEXTER_TIMEOUT="45")
+    assert dc.DEFAULT_CONFIG["gexter_timeout"] == 45
+    assert isinstance(dc.DEFAULT_CONFIG["gexter_timeout"], int)
+
+
+def test_invalid_gexter_timeout_names_the_env_var(monkeypatch):
+    """A bare int() would raise "invalid literal for int()" without naming the
+    variable, and would fail the import of tradingagents.default_config itself.
+    """
+    monkeypatch.setenv("TRADINGAGENTS_GEXTER_TIMEOUT", "abc")
+    with pytest.raises(ValueError, match="TRADINGAGENTS_GEXTER_TIMEOUT"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("TRADINGAGENTS_GEXTER_TIMEOUT", raising=False)
+    importlib.reload(default_config_module)
 
 
 def test_invalid_int_raises(monkeypatch):

@@ -4,25 +4,16 @@ from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_market_structure,
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.dataflows.gexter import gexter_configured
 
 
-def create_market_analyst(llm):
-
-    def market_analyst_node(state):
-        current_date = state["trade_date"]
-        instrument_context = get_instrument_context_from_state(state)
-
-        tools = [
-            get_stock_data,
-            get_indicators,
-            get_verified_market_snapshot,
-        ]
-
-        system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+def _build_system_message(gexter_available: bool) -> str:
+    return (
+        """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
@@ -51,9 +42,37 @@ Volume-Based Indicators:
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
-            + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
-            + get_language_instruction()
+        + (
+            """
+
+You also have get_market_structure, which reports S&P index options positioning: the gamma-exposure regime, the gamma flip strike, and call/put walls. Dealers long gamma (positive net GEX, "compression") tend to dampen moves toward the flip strike; dealers short gamma ("expansion") tend to accelerate them. Call it once when index positioning would inform your read of the tape, and pass the ticker you are analyzing. When that ticker is not in the S&P complex, treat the result as market-regime background, not as a signal about your ticker. If it returns DATA_UNAVAILABLE, proceed without it and do not fabricate positioning."""
+            if gexter_available
+            else ""
         )
+        + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+        + get_language_instruction()
+    )
+
+
+def create_market_analyst(llm):
+
+    def market_analyst_node(state):
+        current_date = state["trade_date"]
+        instrument_context = get_instrument_context_from_state(state)
+
+        tools = [
+            get_stock_data,
+            get_indicators,
+            get_verified_market_snapshot,
+        ]
+        # Fork-local: GEXter supplies index options positioning. Bound only when
+        # configured, so an upstream user without GEXter sees an unchanged tool
+        # list and never spends a tool call on something that cannot succeed.
+        gexter_available = gexter_configured()
+        if gexter_available:
+            tools.append(get_market_structure)
+
+        system_message = _build_system_message(gexter_available)
 
         prompt = ChatPromptTemplate.from_messages(
             [

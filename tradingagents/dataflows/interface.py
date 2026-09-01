@@ -18,6 +18,7 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .gexter import get_market_structure as get_gexter_market_structure
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -74,6 +75,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
+    },
+    "market_structure": {
+        "description": "Index options positioning and gamma-exposure regime",
+        "tools": [
+            "get_market_structure",
+        ]
     }
 }
 
@@ -82,14 +89,16 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "gexter",
 ]
 
-# Optional enrichment categories. These add macro/event context to the news
-# analyst but are not core to a decision, so a vendor failure here degrades to a
-# sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
-# key, or a network blip should not crash an analysis over flavour data). Core
-# categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+# Optional enrichment categories. These add macro, event, and market-structure
+# context to the analyst that consumes them, but are not core to a decision, so
+# a vendor failure here degrades to a sentinel instead of aborting the run (a
+# bad LLM-supplied indicator, a missing key, or a network blip should not crash
+# an analysis over flavour data). Core categories (prices, fundamentals, news)
+# still raise so a broken primary is loud.
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "market_structure"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +149,10 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # market_structure
+    "get_market_structure": {
+        "gexter": get_gexter_market_structure,
     },
 }
 
