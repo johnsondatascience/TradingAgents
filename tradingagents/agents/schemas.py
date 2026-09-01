@@ -208,6 +208,58 @@ class TraderProposal(BaseModel):
         return _coerce_optional_float(v)
 
 
+def _pts(value):
+    """A points figure without float noise: 7.200000000000001 -> "7.2".
+
+    The document carries full precision because it is a machine contract.
+    What reaches a reader should not.
+    """
+    try:
+        text = f"{float(value):.2f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(value)
+    return text or "0"
+
+
+def _strike(value):
+    """A listed strike: 7700.0 -> "7700". Never a trailing zero."""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _structure_legs(candidate) -> str:
+    """'long 7700C, short 7725C' for one candidate.
+
+    Shared by the Trader and Portfolio Manager renderers so the same trade
+    never appears in two shapes across the report.
+    """
+    return ", ".join(
+        f"{'short' if leg.get('qty', 0) < 0 else 'long'} "
+        f"{_strike(leg.get('strike'))}"
+        f"{'P' if leg.get('option_type') == 'put' else 'C'}"
+        for leg in candidate.get("legs") or [])
+
+
+def _premium_line(candidate, contracts) -> str:
+    """Net premium and max loss, with the debit stated as a magnitude.
+
+    net_premium is credit-positive in the contract, so a debit arrives
+    negative. Printing "-7.2 pts debit" states the direction twice and
+    invites a reader to net it against a credit elsewhere; the word carries
+    the sign on its own.
+    """
+    premium = candidate.get("net_premium")
+    kind = candidate.get("premium_kind")
+    magnitude = abs(premium) if isinstance(premium, (int, float)) else premium
+    line = (f"**Net Premium**: {_pts(magnitude)} pts {kind}  ·  "
+            f"**Max Loss**: {_pts(candidate.get('max_loss'))} pts")
+    if contracts is not None:
+        line += f"  ·  **Contracts**: {contracts}"
+    return line
+
+
 def _trader_candidate_lines(proposal, document):
     """The options block, resolved from the document by id.
 
@@ -224,15 +276,8 @@ def _trader_candidate_lines(proposal, document):
         if candidate is None and proposal.candidate_response is CandidateResponse.ACCEPT:
             note = f"referenced structure unavailable; {note}"
         return ["", f"**Options Structure**: Declined - {note}"]
-    legs = ", ".join(
-        f"{'short' if leg.get('qty', 0) < 0 else 'long'} "
-        f"{leg.get('strike')}{'P' if leg.get('option_type') == 'put' else 'C'}"
-        for leg in candidate.get("legs") or [])
-    premium = (f"**Net Premium**: {candidate.get('net_premium')} pts "
-               f"{candidate.get('premium_kind')}  ·  "
-               f"**Max Loss**: {candidate.get('max_loss')} pts")
-    if proposal.contracts is not None:
-        premium += f"  ·  **Contracts**: {proposal.contracts}"
+    legs = _structure_legs(candidate)
+    premium = _premium_line(candidate, proposal.contracts)
     lines = ["", f"**Options Structure**: {candidate.get('structure')} "
                  f"exp {candidate.get('expiry')} - {legs}",
              "", premium,
@@ -349,15 +394,8 @@ def _pm_structure_lines(decision, document, candidate_id):
     if candidate is None:
         return ["", "**Options Structure**: referenced structure "
                 "unavailable; no structure approved."]
-    legs = ", ".join(
-        f"{'short' if leg.get('qty', 0) < 0 else 'long'} "
-        f"{leg.get('strike')}{'P' if leg.get('option_type') == 'put' else 'C'}"
-        for leg in candidate.get("legs") or [])
-    premium = (f"**Net Premium**: {candidate.get('net_premium')} pts "
-               f"{candidate.get('premium_kind')}  ·  "
-               f"**Max Loss**: {candidate.get('max_loss')} pts")
-    if decision.contracts is not None:
-        premium += f"  ·  **Contracts**: {decision.contracts}"
+    legs = _structure_legs(candidate)
+    premium = _premium_line(candidate, decision.contracts)
     out = ["", f"**Options Structure**: {candidate.get('structure')} "
                f"exp {candidate.get('expiry')} - {legs}",
            "", premium,

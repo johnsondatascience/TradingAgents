@@ -295,3 +295,63 @@ def test_the_pm_cannot_approve_what_the_trader_declined():
         _decision(structure_verdict="approve"), document=_DOC, candidate_id=None)
     assert "unavailable" in rendered
     assert "6380" not in rendered
+
+
+# --- Number formatting: the two renderers must agree ------------------------
+
+_DEBIT_DOC = {"schema_version": 1, "symbols": {"SPX": {"candidates": [{
+    "candidate_id": "SPX_20260831_debit_spread_7700",
+    "structure": "debit_spread", "expiry": "2026-08-31",
+    "legs": [{"option_type": "call", "strike": 7700.0, "qty": 1},
+             {"option_type": "call", "strike": 7725.0, "qty": -1}],
+    "net_premium": -7.200000000000001, "premium_kind": "debit",
+    "max_loss": 7.200000000000001,
+    "quoted_asof": "2026-08-31T11:35:04.771337-04:00",
+}]}}}
+_DEBIT_ID = "SPX_20260831_debit_spread_7700"
+
+
+def _accepted(cid=_DEBIT_ID):
+    return TraderProposal(action="Buy", reasoning="x",
+                          candidate_response=CandidateResponse.ACCEPT,
+                          candidate_id=cid, contracts=1)
+
+
+def test_strikes_render_without_a_trailing_zero():
+    # A listed strike is 7700C, never 7700.0C.
+    rendered = render_trader_proposal(_accepted(), document=_DEBIT_DOC)
+    assert "long 7700C" in rendered and "short 7725C" in rendered
+    assert "7700.0" not in rendered
+
+
+def test_premium_renders_without_float_noise():
+    rendered = render_trader_proposal(_accepted(), document=_DEBIT_DOC)
+    assert "7.200000000000001" not in rendered
+    assert "7.2 pts" in rendered
+
+
+def test_a_debit_is_stated_as_a_magnitude_not_a_negative():
+    # "-7.2 pts debit" says the direction twice, and the minus sign invites a
+    # reader to net it against a credit elsewhere.
+    rendered = render_trader_proposal(_accepted(), document=_DEBIT_DOC)
+    assert "-7.2" not in rendered
+    assert "7.2 pts debit" in rendered
+
+
+def test_the_pm_formats_identically_to_the_trader():
+    trader = render_trader_proposal(_accepted(), document=_DEBIT_DOC)
+    pm = render_pm_decision(_decision(structure_verdict="approve", contracts=1),
+                            document=_DEBIT_DOC, candidate_id=_DEBIT_ID)
+    for token in ("long 7700C", "short 7725C", "7.2 pts debit"):
+        assert token in trader, f"trader missing {token}"
+        assert token in pm, f"PM missing {token}"
+
+
+def test_a_credit_still_renders_positive():
+    rendered = render_trader_proposal(
+        TraderProposal(action="Buy", reasoning="x",
+                       candidate_response=CandidateResponse.ACCEPT,
+                       candidate_id=_CID),
+        document=_DOC)
+    assert "2.5 pts credit" in rendered
+    assert "short 6380P" in rendered and "long 6475C" in rendered
