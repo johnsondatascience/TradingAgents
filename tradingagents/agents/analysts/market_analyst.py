@@ -8,7 +8,14 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
-from tradingagents.dataflows.gexter import gexter_configured
+from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.errors import VendorError
+from tradingagents.dataflows.gexter import (
+    apply_freshness_gate,
+    fetch_document,
+    gexter_configured,
+    resolve_gexter_symbol,
+)
 
 
 def _build_system_message(gexter_available: bool) -> str:
@@ -54,6 +61,42 @@ You also have get_market_structure, which reports S&P index options positioning:
     )
 
 
+def fetch_market_structure(state):
+    """GEXter's document for this run, or None when it does not apply.
+
+    Called from the node body before the LLM runs. That ordering is the point:
+    the model cannot choose the date, cannot skip the fetch, and the Trader
+    later reads this same object rather than a paraphrase that survived five
+    hops of LLM summarisation.
+
+    Never raises. Market structure is optional context, and a GEXter outage
+    must degrade the run rather than abort the graph.
+    """
+    if not gexter_configured():
+        return None
+    symbol, is_sp_complex = resolve_gexter_symbol(state.get("company_of_interest"))
+    if not is_sp_complex:
+        # Index positioning is legitimate background for any name, but it is not
+        # worth a subprocess on a path that never had one.
+        return None
+    config = get_config()
+    try:
+        document = fetch_document(
+            symbol=symbol,
+            trade_date=state.get("trade_date"),
+            cutoff=config.get("gexter_cutoff"),
+            candidates=bool(config.get("gexter_candidates", True)),
+            dte_max=config.get("gexter_dte_max", 2),
+        )
+    except (VendorError, ValueError, OSError):
+        return None
+    entry = (document.get("symbols") or {}).get(symbol)
+    if isinstance(entry, dict):
+        document["symbols"][symbol] = apply_freshness_gate(
+            entry, state.get("trade_date"))
+    return document
+
+
 def create_market_analyst(llm):
 
     def market_analyst_node(state):
@@ -68,6 +111,7 @@ def create_market_analyst(llm):
         # Fork-local: GEXter supplies index options positioning. Bound only when
         # configured, so an upstream user without GEXter sees an unchanged tool
         # list and never spends a tool call on something that cannot succeed.
+        market_structure = fetch_market_structure(state)
         gexter_available = gexter_configured()
         if gexter_available:
             tools.append(get_market_structure)
@@ -109,6 +153,7 @@ def create_market_analyst(llm):
         return {
             "messages": [result],
             "market_report": report,
+            "market_structure": market_structure,
         }
 
     return market_analyst_node

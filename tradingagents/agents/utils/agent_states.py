@@ -74,3 +74,19 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+
+    # Fork-local (GEXter). Plain overwrite semantics, None by default, so every
+    # equity run and every non-S&P ticker is untouched.
+    market_structure: Annotated[
+        dict | None,
+        "GEXter market-structure document (schema v1) fetched at run start; "
+        "None when GEXter is unconfigured or the ticker is outside the S&P complex",
+    ]
+
+    # Fork-local (GEXter). Plain overwrite semantics, None by default, so every
+    # equity run and every non-S&P ticker is untouched.
+    market_structure: Annotated[
+        dict | None,
+        "GEXter market-structure document (schema v1) fetched at run start; "
+        "None when GEXter is unconfigured or the ticker is outside the S&P complex",
+    ]

@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError
@@ -533,12 +534,24 @@ def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
     return render_document(document, ticker, symbol, is_sp_complex)
 
 
+#: trade_date is a market date, so "today" has to be decided in market time.
+_MARKET_TZ = ZoneInfo("America/New_York")
+
+
 def _is_live_run(trade_date, now) -> bool:
-    """True when the run's date is today in the reference clock's own zone."""
+    """True when the run's date is today, decided in market time.
+
+    Deliberately not the caller's zone or UTC. Production passes a UTC clock,
+    and after 20:00 ET the UTC calendar has already rolled over -- so comparing
+    against it would classify every evening run as a replay and silently switch
+    the freshness gate off at exactly the hours when quotes are most stale.
+    """
     if not trade_date:
         return True
     try:
-        return str(trade_date)[:10] == now.date().isoformat()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return str(trade_date)[:10] == now.astimezone(_MARKET_TZ).date().isoformat()
     except (AttributeError, ValueError):
         return True
 

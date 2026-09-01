@@ -769,3 +769,33 @@ def test_render_shows_a_stale_basis_note_instead_of_a_number():
     out = render_document(_doc_with([_CANDIDATE], context=context),
                           "^GSPC", "SPX", True)
     assert "11 days stale" in out
+
+
+def test_live_run_detection_uses_market_time_not_utc(gexter_config):
+    """After 20:00 ET the UTC calendar has already rolled over.
+
+    trade_date is a *market* date. Comparing it against a UTC date makes every
+    evening run look like a replay, silently disabling the freshness gate at
+    exactly the hours when quotes are most stale.
+    """
+    from tradingagents.dataflows.gexter import _is_live_run
+    # Production passes a UTC-aware clock, which is where this bites: at 21:00
+    # ET the UTC date is already the next day.
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    assert utc_now.date().isoformat() == "2026-09-01"
+    assert _is_live_run("2026-08-31", utc_now) is True
+
+
+def test_evening_run_still_drops_stale_quotes(gexter_config):
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    gated = apply_freshness_gate(_entry(utc_now - timedelta(seconds=7200)),
+                                 trade_date="2026-08-31", now=utc_now)
+    assert gated["candidates"] == []
+
+
+def test_a_genuine_replay_is_still_not_gated(gexter_config):
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    gated = apply_freshness_gate(
+        _entry(datetime(2026, 6, 10, 13, 45, tzinfo=_ET_OFFSET)),
+        trade_date="2026-06-10", now=utc_now)
+    assert len(gated["candidates"]) == 1
