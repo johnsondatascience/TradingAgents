@@ -118,6 +118,34 @@ def render_research_plan(plan: ResearchPlan) -> str:
 # ---------------------------------------------------------------------------
 
 
+class CandidateResponse(str, Enum):
+    """The Trader's verdict on a GEXter candidate.
+
+    There is deliberately no MODIFY. Any field letting the model adjust a
+    strike or a premium reintroduces exactly the LLM arithmetic that building
+    candidates deterministically exists to eliminate; "a different width" is a
+    decline with a reason.
+    """
+
+    ACCEPT = "accept"
+    DECLINE = "decline"
+
+
+def find_candidate(document, candidate_id):
+    """The candidate with this id anywhere in the document, or None.
+
+    Exact match by design: the id is opaque, and a fuzzy match would let a
+    near-miss resolve to a structure the model did not choose.
+    """
+    if not document or not candidate_id:
+        return None
+    for entry in (document.get("symbols") or {}).values():
+        for candidate in (entry or {}).get("candidates") or []:
+            if candidate.get("candidate_id") == candidate_id:
+                return candidate
+    return None
+
+
 class TraderProposal(BaseModel):
     """Structured transaction proposal produced by the Trader.
 
@@ -149,13 +177,72 @@ class TraderProposal(BaseModel):
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
+    candidate_response: CandidateResponse | None = Field(
+        default=None,
+        description=(
+            "Whether you accept or decline the offered options structure. "
+            "Declining is a first-class outcome: a low-conviction, small-size "
+            "candidate on a no-trade day should be declined."
+        ),
+    )
+    candidate_id: str | None = Field(
+        default=None,
+        description=(
+            "The candidate_id of the structure you are responding to, copied "
+            "exactly. Never invent one, and never restate its strikes or "
+            "premiums - they are rendered from the source data."
+        ),
+    )
+    candidate_reasoning: str | None = Field(
+        default=None,
+        description="Why you accepted or declined it. One to three sentences.",
+    )
+    contracts: int | None = Field(
+        default=None,
+        description="How many contracts, if you accepted.",
+    )
+
     @field_validator("entry_price", "stop_loss", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
+def _trader_candidate_lines(proposal, document):
+    """The options block, resolved from the document by id.
+
+    The proposal contributes no numbers. Without a document, on an unknown id,
+    or on a decline, nothing is printed but the verdict: degrading to the
+    equity shape is always correct, and printing a structure the model
+    described in prose would be fabrication.
+    """
+    if proposal.candidate_response is None:
+        return []
+    candidate = find_candidate(document, proposal.candidate_id)
+    if proposal.candidate_response is CandidateResponse.DECLINE or candidate is None:
+        note = proposal.candidate_reasoning or "no reason given"
+        if candidate is None and proposal.candidate_response is CandidateResponse.ACCEPT:
+            note = f"referenced structure unavailable; {note}"
+        return ["", f"**Options Structure**: Declined - {note}"]
+    legs = ", ".join(
+        f"{'short' if leg.get('qty', 0) < 0 else 'long'} "
+        f"{leg.get('strike')}{'P' if leg.get('option_type') == 'put' else 'C'}"
+        for leg in candidate.get("legs") or [])
+    premium = (f"**Net Premium**: {candidate.get('net_premium')} pts "
+               f"{candidate.get('premium_kind')}  ·  "
+               f"**Max Loss**: {candidate.get('max_loss')} pts")
+    if proposal.contracts is not None:
+        premium += f"  ·  **Contracts**: {proposal.contracts}"
+    lines = ["", f"**Options Structure**: {candidate.get('structure')} "
+                 f"exp {candidate.get('expiry')} - {legs}",
+             "", premium,
+             "", f"**Quoted As Of**: {candidate.get('quoted_asof')}"]
+    if proposal.candidate_reasoning:
+        lines.extend(["", f"**Structure Rationale**: {proposal.candidate_reasoning}"])
+    return lines
+
+
+def render_trader_proposal(proposal: TraderProposal, document=None) -> str:
     """Render a TraderProposal to markdown.
 
     The trailing ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**`` line is
@@ -173,6 +260,7 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    parts.extend(_trader_candidate_lines(proposal, document))
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
