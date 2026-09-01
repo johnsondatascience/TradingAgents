@@ -354,6 +354,92 @@ def _header(ticker, symbol, is_sp_complex, trading_day):
     return [title, "", caveat, "", freshness, ""]
 
 
+def _leg_text(leg):
+    """'short 6380P' / 'long 6475C' -- the shape a trader reads."""
+    side = "short" if leg.get("qty", 0) < 0 else "long"
+    letter = "P" if str(leg.get("option_type", "")).lower() == "put" else "C"
+    return f"{side} {_fmt_number(leg.get('strike'))}{letter}"
+
+
+def _spot_context_lines(context):
+    """Levels measured against spot. Rendered even when no candidate survives.
+
+    This is what gives a reader something on days when nothing is tradeable,
+    which is why it sits outside the candidate guard.
+    """
+    if not context:
+        return []
+    lines = ["", "### Spot context (0-2DTE)"]
+    head = []
+    for label, key in (("spot", "spot"), ("ATM", "atm_strike"),
+                       ("expected move", "session_em_points")):
+        value = _fmt_number(context.get(key))
+        if value is not None:
+            head.append(f"{label} {value}")
+    if head:
+        lines.append("  ·  ".join(head))
+    for level in context.get("levels") or []:
+        mark = "in play" if level.get("in_play") else "too far to anchor"
+        lines.append(
+            f"- **{level.get('name')}** {_fmt_number(level.get('strike'))} "
+            f"({_fmt_number(level.get('offset_points'))} pts, "
+            f"{_fmt_number(level.get('offset_em'))} EM — {mark})")
+    resolution = context.get("resolution")
+    if resolution:
+        lines.append(
+            f"Regime resolves at {_fmt_number(resolution.get('flip'))}: above, "
+            f"{resolution.get('above')}; below, {resolution.get('below')}.")
+    basis = context.get("es_basis")
+    if basis and basis.get("basis") is not None:
+        lines.append(f"ES basis {_fmt_number(basis['basis'])} (as of "
+                     f"{basis.get('latest_session')}); strikes remain SPX contracts.")
+    elif basis and basis.get("suppressed_reason"):
+        lines.append(f"*{basis['suppressed_reason']}*")
+    return lines
+
+
+def _candidate_lines(candidates, reason):
+    """Priced structures, or why there are none.
+
+    Every number here is GEXter's; nothing is computed in this process. The
+    instruction line exists because a model asked to 'check' a spread will
+    otherwise re-derive it and disagree with the source by a few cents.
+    """
+    if candidates is None:
+        return []
+    if not candidates:
+        note = reason or "no structure priced within the fill guards"
+        return ["", "### Trade candidates", f"None available: {note}."]
+    lines = ["", "### Trade candidates",
+             "These are computed structures. Quote them exactly; do not "
+             "recompute strikes, premiums, or max loss."]
+    for candidate in candidates:
+        legs = ", ".join(_leg_text(leg) for leg in candidate.get("legs") or [])
+        lines.append("")
+        lines.append(f"**`{candidate.get('candidate_id')}`** — "
+                     f"{candidate.get('structure')} {candidate.get('dte')}DTE "
+                     f"exp {candidate.get('expiry')}")
+        lines.append(legs)
+        detail = [f"net {_fmt_number(candidate.get('net_premium'))} pts "
+                  f"{candidate.get('premium_kind')}"]
+        for label, key in (("max loss", "max_loss"), ("max profit", "max_profit")):
+            value = _fmt_number(candidate.get(key))
+            if value is not None:
+                detail.append(f"{label} {value} pts")
+        detail.append(f"size x{_fmt_number(candidate.get('size_multiplier'))}")
+        detail.append(f"conviction {candidate.get('conviction')}")
+        lines.append("  ·  ".join(detail))
+        for anchor in candidate.get("anchors") or []:
+            lines.append(f"- {anchor.get('role')} anchored on "
+                         f"{anchor.get('kind')} at "
+                         f"{_fmt_number(anchor.get('strike'))} "
+                         f"({_fmt_number(anchor.get('offset_em'))} EM)")
+        quoted = candidate.get("quoted_asof")
+        if quoted:
+            lines.append(f"quoted {quoted}")
+    return lines
+
+
 def render_document(document, ticker, symbol, is_sp_complex) -> str:
     """Render a GEXter document as markdown for an LLM reader."""
     trading_day = document.get("trading_day") or "unknown date"
@@ -423,6 +509,12 @@ def render_document(document, ticker, symbol, is_sp_complex) -> str:
             "*The real-time and prior-close regimes diverge: intraday open "
             "interest has shifted the regime.*"
         )
+
+    # Appended after the regime read. Both are absent unless GEXter was asked
+    # for candidates, so a document from an older build renders as it did.
+    lines += _spot_context_lines(entry.get("spot_context"))
+    lines += _candidate_lines(entry.get("candidates"),
+                              entry.get("candidates_suppressed_reason"))
     return "\n".join(lines)
 
 

@@ -683,3 +683,89 @@ def test_freshness_gate_tolerates_an_unparseable_quote_time(gexter_config):
     entry["candidates"][0]["quoted_asof"] = "not a timestamp"
     gated = apply_freshness_gate(entry, trade_date="2026-08-31", now=now)
     assert len(gated["candidates"]) == 1     # unmeasurable age is not staleness
+
+
+# --- Rendering the candidate blocks ------------------------------------------
+
+_CANDIDATE = {
+    "candidate_id": "SPX_20260831_iron_condor_6380_6450",
+    "structure": "iron_condor", "expiry": "2026-08-31", "dte": 0,
+    "legs": [
+        {"option_type": "put", "strike": 6380, "qty": -1, "mid": 2.25, "delta": -0.18},
+        {"option_type": "put", "strike": 6355, "qty": 1, "mid": 1.20, "delta": -0.10},
+        {"option_type": "call", "strike": 6450, "qty": -1, "mid": 3.40, "delta": 0.21},
+        {"option_type": "call", "strike": 6475, "qty": 1, "mid": 1.95, "delta": 0.12},
+    ],
+    "net_premium": 2.50, "premium_kind": "credit",
+    "max_loss": 22.50, "max_profit": 2.50,
+    "size_multiplier": 0.85, "conviction": "moderate",
+    "quoted_asof": "2026-08-31T13:45:00-04:00",
+    "anchors": [{"role": "short_call", "kind": "call_wall", "strike": 6450,
+                 "offset_em": 0.72, "level_in_play": True}],
+}
+
+_CONTEXT = {
+    "spot": 6416.2, "atm_strike": 6415, "session_em_points": 47.1,
+    "gamma_source_mix": 0.31, "join_dropped": 4,
+    "levels": [{"name": "call_wall", "strike": 6450, "offset_points": 33.8,
+                "offset_em": 0.72, "in_play": True}],
+    "resolution": None, "es_basis": None,
+}
+
+
+def _doc_with(candidates, reason=None, context=None):
+    doc = json.loads(_MINIMAL_DOC)
+    entry = doc["symbols"]["SPX"]
+    entry["spot_context"] = _CONTEXT if context is None else context
+    entry["candidates"] = candidates
+    entry["candidates_suppressed_reason"] = reason
+    return doc
+
+
+def test_render_includes_candidate_id_strikes_and_premium():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "SPX_20260831_iron_condor_6380_6450" in out
+    assert "6380" in out and "6475" in out
+    assert "2.5" in out and "credit" in out
+    assert "22.5" in out
+
+
+def test_render_states_the_quote_time_and_conviction():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "13:45" in out
+    assert "moderate" in out
+
+
+def test_render_shows_level_offsets_in_expected_moves():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "0.72" in out
+    assert "47.1" in out
+
+
+def test_render_states_the_suppression_reason_when_there_are_no_candidates():
+    out = render_document(_doc_with([], reason="quotes are 3600s old"),
+                          "^GSPC", "SPX", True)
+    assert "3600s old" in out
+    assert "47.1" in out                   # spot_context still rendered
+
+
+def test_render_tells_the_model_not_to_recompute():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "do not recompute" in out.lower()
+
+
+def test_render_is_unchanged_when_the_blocks_are_absent():
+    out = render_document(json.loads(_MINIMAL_DOC), "^GSPC", "SPX", True)
+    assert "Trade candidates" not in out
+    assert "Spot context" not in out
+    assert "compression" in out            # the regime read still renders
+
+
+def test_render_shows_a_stale_basis_note_instead_of_a_number():
+    context = dict(_CONTEXT, es_basis={
+        "basis": None, "median_basis": None, "latest_session": "2026-08-20",
+        "levels_es": [],
+        "suppressed_reason": "ES basis is 11 days stale (latest session 2026-08-20)"})
+    out = render_document(_doc_with([_CANDIDATE], context=context),
+                          "^GSPC", "SPX", True)
+    assert "11 days stale" in out
