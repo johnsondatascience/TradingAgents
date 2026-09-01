@@ -23,6 +23,13 @@ _ENV_OVERRIDES = {
     # Routed through _coerce like every other numeric key so a malformed value
     # names the env var instead of raising a bare int() ValueError at import.
     "TRADINGAGENTS_GEXTER_TIMEOUT":       "gexter_timeout",
+    # Fork-local (GEXter): the 0-2DTE candidate path. gexter_cutoff defaults to
+    # None, so _coerce falls through to the raw string, which is the ET "HH:MM"
+    # the CLI expects.
+    "TRADINGAGENTS_GEXTER_CANDIDATES":    "gexter_candidates",
+    "TRADINGAGENTS_GEXTER_DTE_MAX":       "gexter_dte_max",
+    "TRADINGAGENTS_GEXTER_CUTOFF":        "gexter_cutoff",
+    "TRADINGAGENTS_GEXTER_MAX_QUOTE_AGE": "gexter_max_quote_age_seconds",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
@@ -85,6 +92,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "gexter_python": os.getenv("TRADINGAGENTS_GEXTER_PYTHON"),
     # Seconds. Overridden by TRADINGAGENTS_GEXTER_TIMEOUT via _ENV_OVERRIDES.
     "gexter_timeout": 120,
+    # Ask GEXter for priced 0-2DTE structure candidates. Costs it a second
+    # DB query; harmless when GEXter is unconfigured, since nothing spawns.
+    "gexter_candidates": True,
+    "gexter_dte_max": 2,
+    # ET "HH:MM" bounding the snapshot load, for point-in-time replay runs.
+    # None means "everything collected so far", which is what a live run
+    # wants. _coerce falls through to the raw string for a None default.
+    "gexter_cutoff": None,
+    # A priced 0DTE structure goes stale in minutes. 1800s is two 15-minute
+    # collection cycles, so one missed cycle does not blind a live run.
+    "gexter_max_quote_age_seconds": 1800,
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.

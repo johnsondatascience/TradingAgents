@@ -18,6 +18,8 @@ subprocess is spawned.
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError
@@ -127,7 +129,8 @@ def _excerpt(text, limit=300):
     return flat[:limit] + ("..." if len(flat) > limit else "")
 
 
-def fetch_document(symbol, top_strikes=None) -> dict:
+def fetch_document(symbol, top_strikes=None, trade_date=None, cutoff=None,
+                   candidates=None, dte_max=None) -> dict:
     """Run GEXter's CLI and return its parsed, version-checked document.
 
     Raises GexterUnavailableError for every failure mode, so the router's
@@ -137,6 +140,20 @@ def fetch_document(symbol, top_strikes=None) -> dict:
     argv = [python, os.path.join(repo, GEXTER_CLI), "--json", "--symbols", symbol]
     if top_strikes is not None:
         argv += ["--top-strikes", str(top_strikes)]
+    # --date and --cutoff have existed on the CLI all along; the gap was that
+    # nothing here passed them. They are what makes a replay run
+    # point-in-time correct. Flags are omitted rather than passed empty, so
+    # GEXter's own defaults apply and the subprocess contract stays explicit.
+    if trade_date:
+        argv += ["--date", str(trade_date)]
+    if cutoff:
+        argv += ["--cutoff", str(cutoff)]
+    if candidates:
+        argv += ["--candidates"]
+        # Only meaningful alongside --candidates: passing it alone is
+        # accepted and silently ignored, which reads as a honoured tenor.
+        if dte_max is not None:
+            argv += ["--dte-max", str(dte_max)]
 
     try:
         completed = subprocess.run(
@@ -338,6 +355,92 @@ def _header(ticker, symbol, is_sp_complex, trading_day):
     return [title, "", caveat, "", freshness, ""]
 
 
+def _leg_text(leg):
+    """'short 6380P' / 'long 6475C' -- the shape a trader reads."""
+    side = "short" if leg.get("qty", 0) < 0 else "long"
+    letter = "P" if str(leg.get("option_type", "")).lower() == "put" else "C"
+    return f"{side} {_fmt_number(leg.get('strike'))}{letter}"
+
+
+def _spot_context_lines(context):
+    """Levels measured against spot. Rendered even when no candidate survives.
+
+    This is what gives a reader something on days when nothing is tradeable,
+    which is why it sits outside the candidate guard.
+    """
+    if not context:
+        return []
+    lines = ["", "### Spot context (0-2DTE)"]
+    head = []
+    for label, key in (("spot", "spot"), ("ATM", "atm_strike"),
+                       ("expected move", "session_em_points")):
+        value = _fmt_number(context.get(key))
+        if value is not None:
+            head.append(f"{label} {value}")
+    if head:
+        lines.append("  ·  ".join(head))
+    for level in context.get("levels") or []:
+        mark = "in play" if level.get("in_play") else "too far to anchor"
+        lines.append(
+            f"- **{level.get('name')}** {_fmt_number(level.get('strike'))} "
+            f"({_fmt_number(level.get('offset_points'))} pts, "
+            f"{_fmt_number(level.get('offset_em'))} EM — {mark})")
+    resolution = context.get("resolution")
+    if resolution:
+        lines.append(
+            f"Regime resolves at {_fmt_number(resolution.get('flip'))}: above, "
+            f"{resolution.get('above')}; below, {resolution.get('below')}.")
+    basis = context.get("es_basis")
+    if basis and basis.get("basis") is not None:
+        lines.append(f"ES basis {_fmt_number(basis['basis'])} (as of "
+                     f"{basis.get('latest_session')}); strikes remain SPX contracts.")
+    elif basis and basis.get("suppressed_reason"):
+        lines.append(f"*{basis['suppressed_reason']}*")
+    return lines
+
+
+def _candidate_lines(candidates, reason):
+    """Priced structures, or why there are none.
+
+    Every number here is GEXter's; nothing is computed in this process. The
+    instruction line exists because a model asked to 'check' a spread will
+    otherwise re-derive it and disagree with the source by a few cents.
+    """
+    if candidates is None:
+        return []
+    if not candidates:
+        note = reason or "no structure priced within the fill guards"
+        return ["", "### Trade candidates", f"None available: {note}."]
+    lines = ["", "### Trade candidates",
+             "These are computed structures. Quote them exactly; do not "
+             "recompute strikes, premiums, or max loss."]
+    for candidate in candidates:
+        legs = ", ".join(_leg_text(leg) for leg in candidate.get("legs") or [])
+        lines.append("")
+        lines.append(f"**`{candidate.get('candidate_id')}`** — "
+                     f"{candidate.get('structure')} {candidate.get('dte')}DTE "
+                     f"exp {candidate.get('expiry')}")
+        lines.append(legs)
+        detail = [f"net {_fmt_number(candidate.get('net_premium'))} pts "
+                  f"{candidate.get('premium_kind')}"]
+        for label, key in (("max loss", "max_loss"), ("max profit", "max_profit")):
+            value = _fmt_number(candidate.get(key))
+            if value is not None:
+                detail.append(f"{label} {value} pts")
+        detail.append(f"size x{_fmt_number(candidate.get('size_multiplier'))}")
+        detail.append(f"conviction {candidate.get('conviction')}")
+        lines.append("  ·  ".join(detail))
+        for anchor in candidate.get("anchors") or []:
+            lines.append(f"- {anchor.get('role')} anchored on "
+                         f"{anchor.get('kind')} at "
+                         f"{_fmt_number(anchor.get('strike'))} "
+                         f"({_fmt_number(anchor.get('offset_em'))} EM)")
+        quoted = candidate.get("quoted_asof")
+        if quoted:
+            lines.append(f"quoted {quoted}")
+    return lines
+
+
 def render_document(document, ticker, symbol, is_sp_complex) -> str:
     """Render a GEXter document as markdown for an LLM reader."""
     trading_day = document.get("trading_day") or "unknown date"
@@ -407,6 +510,12 @@ def render_document(document, ticker, symbol, is_sp_complex) -> str:
             "*The real-time and prior-close regimes diverge: intraday open "
             "interest has shifted the regime.*"
         )
+
+    # Appended after the regime read. Both are absent unless GEXter was asked
+    # for candidates, so a document from an older build renders as it did.
+    lines += _spot_context_lines(entry.get("spot_context"))
+    lines += _candidate_lines(entry.get("candidates"),
+                              entry.get("candidates_suppressed_reason"))
     return "\n".join(lines)
 
 
@@ -418,8 +527,102 @@ def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
     instrument or explicitly disclaimed. ``symbols`` overrides the mapping with
     a SINGLE GEXter symbol; GEXter's CLI accepts a comma-separated list, but the
     renderer looks up exactly one key, so a list would fetch data and discard it.
+
+    Takes no date from the model, and is bounded anyway: the run's date and
+    cutoff come from config, recorded by the analyst node before the model
+    could reach this. Without that the node's careful --date/--cutoff bounding
+    was undone by the first tool call, and a replay run read positioning from
+    after the date under analysis -- through the one door the model controls.
     """
     mapped, is_sp_complex = resolve_gexter_symbol(ticker)
     symbol = (symbols or mapped).strip().upper()
-    document = fetch_document(symbol, top_strikes=top_strikes)
+    config = get_config()
+    trade_date = config.get("gexter_trade_date")
+    document = fetch_document(
+        symbol,
+        top_strikes=top_strikes,
+        trade_date=trade_date,
+        cutoff=config.get("gexter_cutoff"),
+        candidates=bool(config.get("gexter_candidates", True)),
+        dte_max=config.get("gexter_dte_max", 2),
+    )
+    entry = (document.get("symbols") or {}).get(symbol)
+    if isinstance(entry, dict):
+        # The same gate the node applies. Two paths to one document that gate
+        # its candidates differently is how the model ends up reasoning about
+        # a structure the node had already ruled untradeable.
+        document["symbols"][symbol] = apply_freshness_gate(entry, trade_date)
     return render_document(document, ticker, symbol, is_sp_complex)
+
+
+#: trade_date is a market date, so "today" has to be decided in market time.
+_MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def _is_live_run(trade_date, now) -> bool:
+    """True when the run's date is today, decided in market time.
+
+    Deliberately not the caller's zone or UTC. Production passes a UTC clock,
+    and after 20:00 ET the UTC calendar has already rolled over -- so comparing
+    against it would classify every evening run as a replay and silently switch
+    the freshness gate off at exactly the hours when quotes are most stale.
+    """
+    if not trade_date:
+        return True
+    try:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return str(trade_date)[:10] == now.astimezone(_MARKET_TZ).date().isoformat()
+    except (AttributeError, ValueError):
+        return True
+
+
+def apply_freshness_gate(entry, trade_date, now=None, max_age=None) -> dict:
+    """Drop candidates whose quotes are too old to trade on.
+
+    Only fires on a live run. On a replay the cutoff already defines the
+    as-of, and measuring a historical quote against wall-clock now would
+    suppress every candidate ever produced for a past date.
+
+    spot_context is never touched: stale quotes make a structure
+    untradeable, not the levels wrong.
+    """
+    candidates = entry.get("candidates")
+    if not candidates:
+        return entry
+    now = now or datetime.now(timezone.utc)
+    if not _is_live_run(trade_date, now):
+        return entry
+    if max_age is None:
+        max_age = int(get_config().get("gexter_max_quote_age_seconds", 1800))
+
+    oldest = None
+    for candidate in candidates:
+        quoted = candidate.get("quoted_asof")
+        if not quoted:
+            continue
+        try:
+            stamp = datetime.fromisoformat(quoted)
+            age = (now - stamp).total_seconds()
+        except (TypeError, ValueError):
+            # An unreadable stamp is not evidence of staleness. Suppressing
+            # on it would silently drop tradeable structures over a format
+            # change rather than an age problem.
+            #
+            # The subtraction is inside the try because a stamp with no UTC
+            # offset is unreadable in the same sense: fromisoformat accepts
+            # it and then the subtraction raises TypeError, which is caught
+            # by neither this clause nor fetch_market_structure's, so an
+            # optional-context vendor would abort the graph. Assuming a zone
+            # instead would be a guess that can be hours wrong either way.
+            continue
+        oldest = age if oldest is None else max(oldest, age)
+
+    if oldest is not None and oldest > max_age:
+        gated = dict(entry)
+        gated["candidates"] = []
+        gated["candidates_suppressed_reason"] = (
+            f"quotes are {int(oldest)}s old, past the {max_age}s live "
+            f"budget; the levels below remain valid")
+        return gated
+    return entry
