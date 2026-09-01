@@ -221,3 +221,77 @@ def test_pm_unknown_id_approves_nothing():
 def test_pm_defaults_leave_the_equity_shape_untouched():
     assert _decision().structure_verdict is None
     assert "Options Structure" not in render_pm_decision(_decision())
+
+
+# --- Degradation: never fabricate a structure --------------------------------
+#
+# Three ways this can fail. All must produce today's equity-shaped output
+# rather than an invented structure.
+
+
+def test_free_text_fallback_renders_no_options_block():
+    """A failed structured call yields prose, which carries no candidate_id.
+
+    Degrading to the equity shape is correct; printing a structure the model
+    described in prose would be fabrication.
+    """
+    from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+    class FailingStructured:
+        def invoke(self, prompt):
+            raise RuntimeError("provider returned malformed JSON")
+
+    class FreeText:
+        def invoke(self, prompt):
+            return type("M", (), {"content": "I like the 6380/6450 condor."})()
+
+    out = invoke_structured_or_freetext(
+        FailingStructured(), FreeText(), [],
+        lambda p: render_trader_proposal(p, document=_DOC), "Trader")
+    assert "Options Structure" not in out
+    assert "**Net Premium**" not in out
+
+
+def test_a_structured_miss_returning_none_also_degrades():
+    from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+    class ReturnsNone:
+        def invoke(self, prompt):
+            return None
+
+    class FreeText:
+        def invoke(self, prompt):
+            return type("M", (), {"content": "prose only"})()
+
+    out = invoke_structured_or_freetext(
+        ReturnsNone(), FreeText(), [],
+        lambda p: render_trader_proposal(p, document=_DOC), "Trader")
+    assert "Options Structure" not in out
+
+
+def test_no_document_renders_no_structure():
+    proposal = TraderProposal(
+        action="Buy", reasoning="x",
+        candidate_response=CandidateResponse.ACCEPT, candidate_id=_CID)
+    rendered = render_trader_proposal(proposal, document=None)
+    assert "6380P" not in rendered
+    assert "Declined" in rendered or "unavailable" in rendered
+
+
+def test_a_suppressed_candidate_list_never_yields_a_structure():
+    # The freshness gate emptied the list; the model still references an id.
+    doc = {"schema_version": 1, "symbols": {"SPX": {
+        "candidates": [],
+        "candidates_suppressed_reason": "quotes are 3600s old"}}}
+    proposal = TraderProposal(
+        action="Buy", reasoning="x",
+        candidate_response=CandidateResponse.ACCEPT, candidate_id=_CID)
+    assert "6380P" not in render_trader_proposal(proposal, document=doc)
+
+
+def test_the_pm_cannot_approve_what_the_trader_declined():
+    # selected_candidate_id is None on a decline, so there is nothing to resolve.
+    rendered = render_pm_decision(
+        _decision(structure_verdict="approve"), document=_DOC, candidate_id=None)
+    assert "unavailable" in rendered
+    assert "6380" not in rendered
