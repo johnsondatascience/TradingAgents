@@ -624,3 +624,62 @@ def test_fetch_document_still_rejects_an_unknown_schema_version(gexter_config, m
     _capture_argv(monkeypatch, json.dumps({"schema_version": 2, "symbols": {}}))
     with pytest.raises(GexterUnavailableError, match="schema_version"):
         fetch_document("SPX")
+
+
+# --- Live freshness gate -----------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from tradingagents.dataflows.gexter import apply_freshness_gate  # noqa: E402
+
+_ET_OFFSET = timezone(timedelta(hours=-4))
+
+
+def _entry(quoted_at):
+    return {
+        "status": "ok",
+        "spot_context": {"session_em_points": 47.1},
+        "candidates": [{"candidate_id": "SPX_20260831_iron_condor_6380_6450",
+                        "quoted_asof": quoted_at.isoformat()}],
+        "candidates_suppressed_reason": None,
+    }
+
+
+def test_freshness_gate_drops_stale_candidates_on_a_live_run(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(_entry(now - timedelta(seconds=3600)),
+                                 trade_date="2026-08-31", now=now)
+    assert gated["candidates"] == []
+    assert "3600" in gated["candidates_suppressed_reason"]
+    assert gated["spot_context"] is not None       # levels survive the gate
+
+
+def test_freshness_gate_keeps_fresh_candidates_on_a_live_run(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(_entry(now - timedelta(seconds=300)),
+                                 trade_date="2026-08-31", now=now)
+    assert len(gated["candidates"]) == 1
+
+
+def test_freshness_gate_does_not_fire_on_a_replay_run(gexter_config):
+    # trade_date is in the past: the cutoff defines the as-of, and wall-clock
+    # age would suppress every candidate ever produced for a historical date.
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(
+        _entry(datetime(2026, 6, 10, 13, 45, tzinfo=_ET_OFFSET)),
+        trade_date="2026-06-10", now=now)
+    assert len(gated["candidates"]) == 1
+
+
+def test_freshness_gate_is_a_no_op_without_candidates(gexter_config):
+    entry = {"status": "ok", "candidates": None, "spot_context": None,
+             "candidates_suppressed_reason": None}
+    assert apply_freshness_gate(entry, trade_date="2026-08-31") == entry
+
+
+def test_freshness_gate_tolerates_an_unparseable_quote_time(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    entry = _entry(now)
+    entry["candidates"][0]["quoted_asof"] = "not a timestamp"
+    gated = apply_freshness_gate(entry, trade_date="2026-08-31", now=now)
+    assert len(gated["candidates"]) == 1     # unmeasurable age is not staleness

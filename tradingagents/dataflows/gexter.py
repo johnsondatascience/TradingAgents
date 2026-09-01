@@ -18,6 +18,7 @@ subprocess is spawned.
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError
@@ -438,3 +439,57 @@ def get_market_structure(ticker, symbols=None, top_strikes=None) -> str:
     symbol = (symbols or mapped).strip().upper()
     document = fetch_document(symbol, top_strikes=top_strikes)
     return render_document(document, ticker, symbol, is_sp_complex)
+
+
+def _is_live_run(trade_date, now) -> bool:
+    """True when the run's date is today in the reference clock's own zone."""
+    if not trade_date:
+        return True
+    try:
+        return str(trade_date)[:10] == now.date().isoformat()
+    except (AttributeError, ValueError):
+        return True
+
+
+def apply_freshness_gate(entry, trade_date, now=None, max_age=None) -> dict:
+    """Drop candidates whose quotes are too old to trade on.
+
+    Only fires on a live run. On a replay the cutoff already defines the
+    as-of, and measuring a historical quote against wall-clock now would
+    suppress every candidate ever produced for a past date.
+
+    spot_context is never touched: stale quotes make a structure
+    untradeable, not the levels wrong.
+    """
+    candidates = entry.get("candidates")
+    if not candidates:
+        return entry
+    now = now or datetime.now(timezone.utc)
+    if not _is_live_run(trade_date, now):
+        return entry
+    if max_age is None:
+        max_age = int(get_config().get("gexter_max_quote_age_seconds", 1800))
+
+    oldest = None
+    for candidate in candidates:
+        quoted = candidate.get("quoted_asof")
+        if not quoted:
+            continue
+        try:
+            stamp = datetime.fromisoformat(quoted)
+        except (TypeError, ValueError):
+            # An unreadable stamp is not evidence of staleness. Suppressing
+            # on it would silently drop tradeable structures over a format
+            # change rather than an age problem.
+            continue
+        age = (now - stamp).total_seconds()
+        oldest = age if oldest is None else max(oldest, age)
+
+    if oldest is not None and oldest > max_age:
+        gated = dict(entry)
+        gated["candidates"] = []
+        gated["candidates_suppressed_reason"] = (
+            f"quotes are {int(oldest)}s old, past the {max_age}s live "
+            f"budget; the levels below remain valid")
+        return gated
+    return entry
