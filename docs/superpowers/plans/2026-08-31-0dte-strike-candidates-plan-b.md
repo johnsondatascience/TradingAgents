@@ -1279,6 +1279,41 @@ git commit -m "Record end-to-end verification of the candidate chain of custody"
 
 ---
 
+## Verified end to end, 2026-08-31
+
+Real GEXter subprocess -> real schema-v1 document -> real structured call against
+a local LM Studio `openai/gpt-oss-20b` -> renderer. `cli.main` is interactive, so
+the chain was driven directly through `fetch_market_structure` and the Trader
+node, which is where every number actually travels; the analyst, researcher and
+risk hops relay prose and touch none of them.
+
+Both paths pass.
+
+**Declined** (candidate as collected: conviction `low`, size 0.65). The model
+refused, `selected_candidate_id` came back `None`, and no leg, strike or premium
+line appeared anywhere in the output.
+
+**Accepted** (same real candidate, conviction raised on a copy to exercise the
+path). The model copied the id verbatim and the renderer resolved it:
+
+```
+**Options Structure**: debit_spread exp 2026-08-31 - long 7700C, short 7725C
+**Net Premium**: 7.2 pts debit  ·  **Max Loss**: 7.2 pts
+**Quoted As Of**: 2026-08-31T11:35:04.771337-04:00
+selected_candidate_id: 'SPX_20260831_debit_spread_7700'
+```
+
+Every rendered figure was checked back against the document, and no strike from
+any other candidate appeared.
+
+The run exposed one defect, now fixed: the schema renderer printed
+`long 7700.0C` and `-7.200000000000001 pts debit` while the vendor renderer
+formatted the same trade correctly. Both now share `_structure_legs` and
+`_premium_line`.
+
+**Not covered.** A full multi-agent run, and replay across many sessions --
+the latter gated on database replication, not on code.
+
 ## Plan B self-review
 
 **Spec coverage.** Component 4 (vendor: flags, freshness gate, fetch-in-node, rendering) → Tasks 2-5. Component 5 (AgentState, TraderProposal, PortfolioDecision, rendering, free-text fallback) → Tasks 5-8. Config → Task 1. The ES basis half of Component 4 is Plan A Task 10, since the block is built GEXter-side.
