@@ -562,3 +562,312 @@ def test_top_strikes_are_not_capped_below_the_documented_default():
     # By count, not by membership: 5400/5450 also appear as levels, so a
     # surviving [:5] cap could still satisfy a "strike in out" check.
     assert line.count("Bn)") == len(strikes)
+
+
+# --- Date, cutoff and candidate flags ----------------------------------------
+
+_MINIMAL_DOC = json.dumps({
+    "schema_version": 1, "trading_day": "2026-08-31", "model_available": True,
+    "symbols": {"SPX": {"status": "ok", "spot": 6416.2,
+                        "asof": "2026-08-31T13:45:00-04:00",
+                        "quality": {}, "stale": {"regime": "compression"},
+                        "nowcast": None, "regime_divergence": None,
+                        "spot_context": None, "candidates": None,
+                        "candidates_suppressed_reason": None}},
+})
+
+
+def _capture_argv(monkeypatch, stdout=_MINIMAL_DOC):
+    """Run fetch_document against a stubbed subprocess and expose its argv."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return seen
+
+
+def test_fetch_document_passes_date_and_cutoff(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", trade_date="2026-08-31", cutoff="11:00")
+    argv = seen["argv"]
+    assert argv[argv.index("--date") + 1] == "2026-08-31"
+    assert argv[argv.index("--cutoff") + 1] == "11:00"
+
+
+def test_fetch_document_omits_absent_optional_flags(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX")
+    for flag in ("--date", "--cutoff", "--candidates", "--dte-max"):
+        assert flag not in seen["argv"]
+
+
+def test_fetch_document_requests_candidates_when_asked(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", candidates=True, dte_max=1)
+    argv = seen["argv"]
+    assert "--candidates" in argv
+    assert argv[argv.index("--dte-max") + 1] == "1"
+
+
+def test_fetch_document_omits_dte_max_without_candidates(gexter_config, monkeypatch):
+    # --dte-max alone would be accepted and silently ignored by the CLI, which
+    # reads as "the tenor was honoured" when nothing was built.
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", candidates=False, dte_max=1)
+    assert "--dte-max" not in seen["argv"]
+
+
+def test_fetch_document_still_rejects_an_unknown_schema_version(gexter_config, monkeypatch):
+    _capture_argv(monkeypatch, json.dumps({"schema_version": 2, "symbols": {}}))
+    with pytest.raises(GexterUnavailableError, match="schema_version"):
+        fetch_document("SPX")
+
+
+# --- Live freshness gate -----------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from tradingagents.dataflows.gexter import apply_freshness_gate  # noqa: E402
+
+_ET_OFFSET = timezone(timedelta(hours=-4))
+
+
+def _entry(quoted_at):
+    return {
+        "status": "ok",
+        "spot_context": {"session_em_points": 47.1},
+        "candidates": [{"candidate_id": "SPX_20260831_iron_condor_6380_6450",
+                        "quoted_asof": quoted_at.isoformat()}],
+        "candidates_suppressed_reason": None,
+    }
+
+
+def test_freshness_gate_drops_stale_candidates_on_a_live_run(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(_entry(now - timedelta(seconds=3600)),
+                                 trade_date="2026-08-31", now=now)
+    assert gated["candidates"] == []
+    assert "3600" in gated["candidates_suppressed_reason"]
+    assert gated["spot_context"] is not None       # levels survive the gate
+
+
+def test_freshness_gate_keeps_fresh_candidates_on_a_live_run(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(_entry(now - timedelta(seconds=300)),
+                                 trade_date="2026-08-31", now=now)
+    assert len(gated["candidates"]) == 1
+
+
+def test_freshness_gate_does_not_fire_on_a_replay_run(gexter_config):
+    # trade_date is in the past: the cutoff defines the as-of, and wall-clock
+    # age would suppress every candidate ever produced for a historical date.
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    gated = apply_freshness_gate(
+        _entry(datetime(2026, 6, 10, 13, 45, tzinfo=_ET_OFFSET)),
+        trade_date="2026-06-10", now=now)
+    assert len(gated["candidates"]) == 1
+
+
+def test_freshness_gate_is_a_no_op_without_candidates(gexter_config):
+    entry = {"status": "ok", "candidates": None, "spot_context": None,
+             "candidates_suppressed_reason": None}
+    assert apply_freshness_gate(entry, trade_date="2026-08-31") == entry
+
+
+def test_freshness_gate_tolerates_an_unparseable_quote_time(gexter_config):
+    now = datetime(2026, 8, 31, 15, 30, tzinfo=_ET_OFFSET)
+    entry = _entry(now)
+    entry["candidates"][0]["quoted_asof"] = "not a timestamp"
+    gated = apply_freshness_gate(entry, trade_date="2026-08-31", now=now)
+    assert len(gated["candidates"]) == 1     # unmeasurable age is not staleness
+
+
+# --- Rendering the candidate blocks ------------------------------------------
+
+_CANDIDATE = {
+    "candidate_id": "SPX_20260831_iron_condor_6380_6450",
+    "structure": "iron_condor", "expiry": "2026-08-31", "dte": 0,
+    "legs": [
+        {"option_type": "put", "strike": 6380, "qty": -1, "mid": 2.25, "delta": -0.18},
+        {"option_type": "put", "strike": 6355, "qty": 1, "mid": 1.20, "delta": -0.10},
+        {"option_type": "call", "strike": 6450, "qty": -1, "mid": 3.40, "delta": 0.21},
+        {"option_type": "call", "strike": 6475, "qty": 1, "mid": 1.95, "delta": 0.12},
+    ],
+    "net_premium": 2.50, "premium_kind": "credit",
+    "max_loss": 22.50, "max_profit": 2.50,
+    "size_multiplier": 0.85, "conviction": "moderate",
+    "quoted_asof": "2026-08-31T13:45:00-04:00",
+    "anchors": [{"role": "short_call", "kind": "call_wall", "strike": 6450,
+                 "offset_em": 0.72, "level_in_play": True}],
+}
+
+_CONTEXT = {
+    "spot": 6416.2, "atm_strike": 6415, "session_em_points": 47.1,
+    "gamma_source_mix": 0.31, "join_dropped": 4,
+    "levels": [{"name": "call_wall", "strike": 6450, "offset_points": 33.8,
+                "offset_em": 0.72, "in_play": True}],
+    "resolution": None, "es_basis": None,
+}
+
+
+def _doc_with(candidates, reason=None, context=None):
+    doc = json.loads(_MINIMAL_DOC)
+    entry = doc["symbols"]["SPX"]
+    entry["spot_context"] = _CONTEXT if context is None else context
+    entry["candidates"] = candidates
+    entry["candidates_suppressed_reason"] = reason
+    return doc
+
+
+def test_render_includes_candidate_id_strikes_and_premium():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "SPX_20260831_iron_condor_6380_6450" in out
+    assert "6380" in out and "6475" in out
+    assert "2.5" in out and "credit" in out
+    assert "22.5" in out
+
+
+def test_render_states_the_quote_time_and_conviction():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "13:45" in out
+    assert "moderate" in out
+
+
+def test_render_shows_level_offsets_in_expected_moves():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "0.72" in out
+    assert "47.1" in out
+
+
+def test_render_states_the_suppression_reason_when_there_are_no_candidates():
+    out = render_document(_doc_with([], reason="quotes are 3600s old"),
+                          "^GSPC", "SPX", True)
+    assert "3600s old" in out
+    assert "47.1" in out                   # spot_context still rendered
+
+
+def test_render_tells_the_model_not_to_recompute():
+    out = render_document(_doc_with([_CANDIDATE]), "^GSPC", "SPX", True)
+    assert "do not recompute" in out.lower()
+
+
+def test_render_is_unchanged_when_the_blocks_are_absent():
+    out = render_document(json.loads(_MINIMAL_DOC), "^GSPC", "SPX", True)
+    assert "Trade candidates" not in out
+    assert "Spot context" not in out
+    assert "compression" in out            # the regime read still renders
+
+
+def test_render_shows_a_stale_basis_note_instead_of_a_number():
+    context = dict(_CONTEXT, es_basis={
+        "basis": None, "median_basis": None, "latest_session": "2026-08-20",
+        "levels_es": [],
+        "suppressed_reason": "ES basis is 11 days stale (latest session 2026-08-20)"})
+    out = render_document(_doc_with([_CANDIDATE], context=context),
+                          "^GSPC", "SPX", True)
+    assert "11 days stale" in out
+
+
+def test_live_run_detection_uses_market_time_not_utc(gexter_config):
+    """After 20:00 ET the UTC calendar has already rolled over.
+
+    trade_date is a *market* date. Comparing it against a UTC date makes every
+    evening run look like a replay, silently disabling the freshness gate at
+    exactly the hours when quotes are most stale.
+    """
+    from tradingagents.dataflows.gexter import _is_live_run
+    # Production passes a UTC-aware clock, which is where this bites: at 21:00
+    # ET the UTC date is already the next day.
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    assert utc_now.date().isoformat() == "2026-09-01"
+    assert _is_live_run("2026-08-31", utc_now) is True
+
+
+def test_evening_run_still_drops_stale_quotes(gexter_config):
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    gated = apply_freshness_gate(_entry(utc_now - timedelta(seconds=7200)),
+                                 trade_date="2026-08-31", now=utc_now)
+    assert gated["candidates"] == []
+
+
+def test_a_genuine_replay_is_still_not_gated(gexter_config):
+    utc_now = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    gated = apply_freshness_gate(
+        _entry(datetime(2026, 6, 10, 13, 45, tzinfo=_ET_OFFSET)),
+        trade_date="2026-06-10", now=utc_now)
+    assert len(gated["candidates"]) == 1
+
+
+def _capture_fetch_kwargs(monkeypatch):
+    """Capture what the LLM-facing tool asks fetch_document for."""
+    seen = {}
+
+    def fake_fetch(symbol, **kwargs):
+        seen.update(kwargs)
+        seen["symbol"] = symbol
+        return json.loads(_MINIMAL_DOC)
+
+    monkeypatch.setattr("tradingagents.dataflows.gexter.fetch_document", fake_fetch)
+    return seen
+
+
+def test_the_tool_bounds_its_fetch_by_the_run_date(gexter_config, monkeypatch):
+    """The tool is the door the model walks through, and it was unbounded.
+
+    fetch_market_structure carefully passes --date and --cutoff, but the
+    moment the model called get_market_structure it got GEXter's latest
+    collected day instead. On a replay the two paths disagreed inside one run
+    and the backtest read positioning from after the date under analysis.
+    """
+    gexter_config["gexter_trade_date"] = "2026-06-02"
+    gexter_config["gexter_cutoff"] = "11:00"
+    set_config(gexter_config)
+    seen = _capture_fetch_kwargs(monkeypatch)
+    get_market_structure("^GSPC")
+    assert seen["trade_date"] == "2026-06-02"
+    assert seen["cutoff"] == "11:00"
+
+
+def test_the_tool_is_unbounded_only_when_no_run_date_is_recorded(
+        gexter_config, monkeypatch):
+    # Called outside a graph run there is no date to honour, and GEXter's own
+    # default (its latest collected day) is the right answer.
+    seen = _capture_fetch_kwargs(monkeypatch)
+    get_market_structure("^GSPC")
+    assert seen["trade_date"] is None
+
+
+def _entry_quoted(stamp):
+    return {"candidates": [{"candidate_id": "SPX_x", "quoted_asof": stamp}],
+            "candidates_suppressed_reason": None}
+
+
+def test_a_naive_quoted_asof_does_not_abort_the_graph(gexter_config):
+    """fromisoformat accepts a stamp with no offset; the subtraction does not.
+
+    The TypeError lands outside the except that guards the parse, and outside
+    fetch_market_structure's (VendorError, ValueError, OSError) too -- so an
+    optional-context vendor takes the whole run down, which is exactly what
+    the "never raises" contract on that path exists to prevent.
+    """
+    from tradingagents.dataflows.gexter import apply_freshness_gate
+
+    entry = _entry_quoted("2026-08-31T13:45:00")     # no offset
+    gated = apply_freshness_gate(entry, trade_date=None)
+    # Treated like any other unreadable stamp: not evidence of staleness, so
+    # the candidates stand rather than being silently dropped.
+    assert gated["candidates"] == entry["candidates"]
+
+
+def test_an_aware_quoted_asof_still_suppresses_when_stale(gexter_config):
+    # Guards the guard: if the gate stopped firing at all, the test above
+    # would pass for the wrong reason.
+    from tradingagents.dataflows.gexter import apply_freshness_gate
+
+    gated = apply_freshness_gate(_entry_quoted("2020-01-02T13:45:00-05:00"),
+                                 trade_date=None, max_age=1800)
+    assert gated["candidates"] == []
+    assert "old" in gated["candidates_suppressed_reason"]

@@ -146,3 +146,26 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+def test_gexter_candidate_keys_have_defaults():
+    from tradingagents.default_config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["gexter_candidates"] is True
+    assert DEFAULT_CONFIG["gexter_dte_max"] == 2
+    assert DEFAULT_CONFIG["gexter_cutoff"] is None
+    assert DEFAULT_CONFIG["gexter_max_quote_age_seconds"] == 1800
+
+
+def test_gexter_candidate_keys_coerce_from_env(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_GEXTER_CANDIDATES", "false")
+    monkeypatch.setenv("TRADINGAGENTS_GEXTER_DTE_MAX", "1")
+    monkeypatch.setenv("TRADINGAGENTS_GEXTER_MAX_QUOTE_AGE", "600")
+    monkeypatch.setenv("TRADINGAGENTS_GEXTER_CUTOFF", "11:00")
+    import importlib
+    from tradingagents import default_config
+    importlib.reload(default_config)
+    cfg = default_config.DEFAULT_CONFIG
+    assert cfg["gexter_candidates"] is False
+    assert cfg["gexter_dte_max"] == 1
+    assert cfg["gexter_max_quote_age_seconds"] == 600
+    assert cfg["gexter_cutoff"] == "11:00"

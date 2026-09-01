@@ -35,11 +35,10 @@ def get_market_structure(
     ticker it is market-regime context only. Uses the configured
     market_structure vendor.
 
-    The report covers GEXter's most recently collected trading day, which is
-    not necessarily the date under analysis: this tool takes no date. The
-    rendered header states the day it covers; if that differs from the date
-    you are analyzing, treat the positioning as background only and do not
-    apply it to that date.
+    You do not pass a date: the report is bounded to the date under analysis
+    automatically. The rendered header states the day it covers. On a date for
+    which GEXter collected nothing the header will still name a different day
+    — treat that as background only and do not apply it to your date.
 
     Args:
         ticker (str): The instrument under analysis

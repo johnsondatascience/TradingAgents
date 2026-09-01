@@ -5,6 +5,7 @@ import time
 from collections import deque
 from functools import wraps
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import typer
 from rich import box
@@ -563,7 +564,7 @@ def get_user_selections():
         )
 
     # Step 2: Analysis date
-    default_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    default_date = market_today().strftime("%Y-%m-%d")
     console.print(
         create_question_box(
             "Step 2: Analysis Date",
@@ -741,16 +742,28 @@ def get_user_selections():
     }
 
 
+#: Trading sessions are dated in Eastern time. Deriving "today" from the
+#: operator's local clock puts a machine west of ET a session behind every
+#: evening -- and made the current market date fail the not-in-the-future
+#: check, since that compared against local today too.
+_MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def market_today() -> datetime.date:
+    """Today's date in market time, whatever zone this machine keeps."""
+    return datetime.datetime.now(_MARKET_TZ).date()
+
+
 def get_analysis_date():
     """Get the analysis date from user input."""
     while True:
         date_str = typer.prompt(
-            "", default=datetime.datetime.now().strftime("%Y-%m-%d")
+            "", default=market_today().strftime("%Y-%m-%d")
         )
         try:
             # Validate date format and ensure it's not in the future
             analysis_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            if analysis_date.date() > datetime.datetime.now().date():
+            if analysis_date.date() > market_today():
                 console.print("[red]Error: Analysis date cannot be in the future[/red]")
                 continue
             return date_str
