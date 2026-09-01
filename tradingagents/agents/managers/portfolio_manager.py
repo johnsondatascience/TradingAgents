@@ -70,7 +70,10 @@ Be decisive and ground every conclusion in specific evidence from the analysts.
             structured_llm,
             llm,
             prompt,
-            render_pm_decision,
+            lambda decision: render_pm_decision(
+                decision,
+                document=state.get("market_structure"),
+                candidate_id=state.get("selected_candidate_id")),
             "Portfolio Manager",
         )
 

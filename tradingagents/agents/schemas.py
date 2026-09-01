@@ -310,13 +310,65 @@ class PortfolioDecision(BaseModel):
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
 
+    structure_verdict: Literal["approve", "reject", "resize"] | None = Field(
+        default=None,
+        description=(
+            "Your verdict on the Trader's options structure. 'resize' "
+            "changes only the contract count - the one number risk "
+            "management owns and the only one that cannot corrupt a strike."
+        ),
+    )
+    contracts: int | None = Field(
+        default=None,
+        description="Final contract count, if approving or resizing.",
+    )
+    structure_note: str | None = Field(
+        default=None,
+        description="One sentence on the structure verdict.",
+    )
+
     @field_validator("price_target", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
 
-def render_pm_decision(decision: PortfolioDecision) -> str:
+def _pm_structure_lines(decision, document, candidate_id):
+    """The options block, appended after the headers other code parses.
+
+    Omitted entirely without a verdict, so an equity run renders exactly as
+    it did before. On reject, or when the id does not resolve, the verdict
+    is printed without a structure: there is nothing authoritative to show.
+    """
+    if decision.structure_verdict is None:
+        return []
+    if decision.structure_verdict == "reject":
+        return ["", "**Options Structure**: Rejected - "
+                + (decision.structure_note or "no reason given")]
+    candidate = find_candidate(document, candidate_id)
+    if candidate is None:
+        return ["", "**Options Structure**: referenced structure "
+                "unavailable; no structure approved."]
+    legs = ", ".join(
+        f"{'short' if leg.get('qty', 0) < 0 else 'long'} "
+        f"{leg.get('strike')}{'P' if leg.get('option_type') == 'put' else 'C'}"
+        for leg in candidate.get("legs") or [])
+    premium = (f"**Net Premium**: {candidate.get('net_premium')} pts "
+               f"{candidate.get('premium_kind')}  ·  "
+               f"**Max Loss**: {candidate.get('max_loss')} pts")
+    if decision.contracts is not None:
+        premium += f"  ·  **Contracts**: {decision.contracts}"
+    out = ["", f"**Options Structure**: {candidate.get('structure')} "
+               f"exp {candidate.get('expiry')} - {legs}",
+           "", premium,
+           "", f"**Quoted As Of**: {candidate.get('quoted_asof')}"]
+    if decision.structure_note:
+        out.extend(["", f"**Structure Note**: {decision.structure_note}"])
+    return out
+
+
+def render_pm_decision(decision: PortfolioDecision, document=None,
+                      candidate_id=None) -> str:
     """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
 
     Memory log, CLI display, and saved report files all read this markdown,
@@ -335,6 +387,7 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    parts.extend(_pm_structure_lines(decision, document, candidate_id))
     return "\n".join(parts)
 
 

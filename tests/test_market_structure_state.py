@@ -71,9 +71,13 @@ def test_the_freshness_gate_is_applied_to_the_fetched_entry(monkeypatch):
     monkeypatch.setattr(f"{_MODULE}.gexter_configured", lambda: True)
     monkeypatch.setattr(f"{_MODULE}.fetch_document", lambda **kw: stale)
     import datetime as _dt
+    from zoneinfo import ZoneInfo
+    # The market date, not the local one: this machine is not on ET, and the
+    # gate decides "today" in market time by design.
+    today_et = _dt.datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     doc = fetch_market_structure(
         {"company_of_interest": "^GSPC",
-         "trade_date": _dt.date.today().isoformat(), "messages": []})
+         "trade_date": today_et, "messages": []})
     entry = doc["symbols"]["SPX"]
     assert entry["candidates"] == []
     assert entry["spot_context"] is not None      # levels survive the gate
@@ -155,3 +159,65 @@ def test_an_unknown_id_renders_as_a_decline():
 def test_candidate_response_has_no_modify_member():
     # A modify path would be a numeric output surface under another name.
     assert {m.value for m in CandidateResponse} == {"accept", "decline"}
+
+
+# --- Portfolio Manager verdict, appended not interleaved ---------------------
+
+from tradingagents.agents.schemas import (  # noqa: E402
+    PortfolioDecision, render_pm_decision,
+)
+
+_CID = "SPX_20260831_iron_condor_6380_6450"
+
+
+def _decision(**kw):
+    base = dict(rating="Hold", executive_summary="summary text",
+                investment_thesis="thesis text")
+    base.update(kw)
+    return PortfolioDecision(**base)
+
+
+def test_pm_render_without_a_verdict_is_byte_identical_to_today():
+    assert render_pm_decision(_decision()) == (
+        "**Rating**: Hold\n\n**Executive Summary**: summary text"
+        "\n\n**Investment Thesis**: thesis text")
+
+
+def test_pm_render_appends_the_structure_after_the_parsed_headers():
+    # The memory log, CLI display and report writers parse these three headers.
+    rendered = render_pm_decision(
+        _decision(structure_verdict="approve", contracts=2),
+        document=_DOC, candidate_id=_CID)
+    assert rendered.index("**Rating**") < rendered.index("**Executive Summary**")
+    assert rendered.index("**Executive Summary**") < rendered.index("**Investment Thesis**")
+    assert rendered.index("**Investment Thesis**") < rendered.index("**Options Structure**")
+    assert "Contracts**: 2" in rendered
+
+
+def test_pm_reject_prints_no_structure():
+    rendered = render_pm_decision(
+        _decision(structure_verdict="reject", structure_note="too wide"),
+        document=_DOC, candidate_id=_CID)
+    assert "Rejected" in rendered and "too wide" in rendered
+    assert "6380" not in rendered
+
+
+def test_pm_resize_changes_only_the_contract_count():
+    rendered = render_pm_decision(
+        _decision(structure_verdict="resize", contracts=1),
+        document=_DOC, candidate_id=_CID)
+    assert "Contracts**: 1" in rendered
+    assert "2.5" in rendered            # premium is still the document's
+
+
+def test_pm_unknown_id_approves_nothing():
+    rendered = render_pm_decision(
+        _decision(structure_verdict="approve"),
+        document=_DOC, candidate_id="SPX_hallucinated_1")
+    assert "unavailable" in rendered
+    assert "6380" not in rendered
+
+
+def test_pm_defaults_leave_the_equity_shape_untouched():
+    assert _decision().structure_verdict is None
+    assert "Options Structure" not in render_pm_decision(_decision())

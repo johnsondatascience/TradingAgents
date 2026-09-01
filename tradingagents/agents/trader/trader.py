@@ -6,7 +6,12 @@ import functools
 
 from langchain_core.messages import AIMessage
 
-from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+from tradingagents.agents.schemas import (
+    CandidateResponse,
+    TraderProposal,
+    find_candidate,
+    render_trader_proposal,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -65,6 +70,9 @@ def create_trader(llm):
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
         market_structure = state.get("market_structure")
+        # The render callback is the only place the parsed proposal is
+        # visible, so it is captured there rather than re-invoking the model.
+        proposal_ref = {}
 
         messages = [
             {
@@ -97,14 +105,25 @@ def create_trader(llm):
             messages,
             # The document is the authority on every number. The model supplies
             # an id and a verdict; this renderer supplies the arithmetic.
-            lambda proposal: render_trader_proposal(
-                proposal, document=market_structure),
+            lambda proposal: (
+                proposal_ref.update(proposal=proposal)
+                or render_trader_proposal(proposal, document=market_structure)),
             "Trader",
         )
+
+        # Only an accepted, resolvable id travels on. A declined or invented
+        # one must not reach the Portfolio Manager as something to approve.
+        chosen = None
+        proposal = proposal_ref.get("proposal")
+        if (isinstance(proposal, TraderProposal)
+                and proposal.candidate_response is CandidateResponse.ACCEPT
+                and find_candidate(market_structure, proposal.candidate_id)):
+            chosen = proposal.candidate_id
 
         return {
             "messages": [AIMessage(content=trader_plan)],
             "trader_investment_plan": trader_plan,
+            "selected_candidate_id": chosen,
             "sender": name,
         }
 
