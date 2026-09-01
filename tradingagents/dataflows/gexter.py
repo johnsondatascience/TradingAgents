@@ -127,7 +127,8 @@ def _excerpt(text, limit=300):
     return flat[:limit] + ("..." if len(flat) > limit else "")
 
 
-def fetch_document(symbol, top_strikes=None) -> dict:
+def fetch_document(symbol, top_strikes=None, trade_date=None, cutoff=None,
+                   candidates=None, dte_max=None) -> dict:
     """Run GEXter's CLI and return its parsed, version-checked document.
 
     Raises GexterUnavailableError for every failure mode, so the router's
@@ -137,6 +138,20 @@ def fetch_document(symbol, top_strikes=None) -> dict:
     argv = [python, os.path.join(repo, GEXTER_CLI), "--json", "--symbols", symbol]
     if top_strikes is not None:
         argv += ["--top-strikes", str(top_strikes)]
+    # --date and --cutoff have existed on the CLI all along; the gap was that
+    # nothing here passed them. They are what makes a replay run
+    # point-in-time correct. Flags are omitted rather than passed empty, so
+    # GEXter's own defaults apply and the subprocess contract stays explicit.
+    if trade_date:
+        argv += ["--date", str(trade_date)]
+    if cutoff:
+        argv += ["--cutoff", str(cutoff)]
+    if candidates:
+        argv += ["--candidates"]
+        # Only meaningful alongside --candidates: passing it alone is
+        # accepted and silently ignored, which reads as a honoured tenor.
+        if dte_max is not None:
+            argv += ["--dte-max", str(dte_max)]
 
     try:
         completed = subprocess.run(

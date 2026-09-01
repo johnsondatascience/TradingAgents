@@ -562,3 +562,65 @@ def test_top_strikes_are_not_capped_below_the_documented_default():
     # By count, not by membership: 5400/5450 also appear as levels, so a
     # surviving [:5] cap could still satisfy a "strike in out" check.
     assert line.count("Bn)") == len(strikes)
+
+
+# --- Date, cutoff and candidate flags ----------------------------------------
+
+_MINIMAL_DOC = json.dumps({
+    "schema_version": 1, "trading_day": "2026-08-31", "model_available": True,
+    "symbols": {"SPX": {"status": "ok", "spot": 6416.2,
+                        "asof": "2026-08-31T13:45:00-04:00",
+                        "quality": {}, "stale": {"regime": "compression"},
+                        "nowcast": None, "regime_divergence": None,
+                        "spot_context": None, "candidates": None,
+                        "candidates_suppressed_reason": None}},
+})
+
+
+def _capture_argv(monkeypatch, stdout=_MINIMAL_DOC):
+    """Run fetch_document against a stubbed subprocess and expose its argv."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return seen
+
+
+def test_fetch_document_passes_date_and_cutoff(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", trade_date="2026-08-31", cutoff="11:00")
+    argv = seen["argv"]
+    assert argv[argv.index("--date") + 1] == "2026-08-31"
+    assert argv[argv.index("--cutoff") + 1] == "11:00"
+
+
+def test_fetch_document_omits_absent_optional_flags(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX")
+    for flag in ("--date", "--cutoff", "--candidates", "--dte-max"):
+        assert flag not in seen["argv"]
+
+
+def test_fetch_document_requests_candidates_when_asked(gexter_config, monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", candidates=True, dte_max=1)
+    argv = seen["argv"]
+    assert "--candidates" in argv
+    assert argv[argv.index("--dte-max") + 1] == "1"
+
+
+def test_fetch_document_omits_dte_max_without_candidates(gexter_config, monkeypatch):
+    # --dte-max alone would be accepted and silently ignored by the CLI, which
+    # reads as "the tenor was honoured" when nothing was built.
+    seen = _capture_argv(monkeypatch)
+    fetch_document("SPX", candidates=False, dte_max=1)
+    assert "--dte-max" not in seen["argv"]
+
+
+def test_fetch_document_still_rejects_an_unknown_schema_version(gexter_config, monkeypatch):
+    _capture_argv(monkeypatch, json.dumps({"schema_version": 2, "symbols": {}}))
+    with pytest.raises(GexterUnavailableError, match="schema_version"):
+        fetch_document("SPX")
