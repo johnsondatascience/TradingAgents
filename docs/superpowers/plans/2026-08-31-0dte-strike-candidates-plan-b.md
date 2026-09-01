@@ -16,6 +16,12 @@
 
 Work on `feat/gexter-market-structure`.
 
+**Interpreter.** Run every test under the project conda env, not system
+Python: `C:/Users/johnsnmi/AppData/Local/miniconda3/envs/tradingagents/python.exe`.
+System Python lacks `stockstats`, `questionary` and the provider langchain
+packages, so every agent-module test fails to *collect* -- which reads as a
+broken change rather than a missing dependency.
+
 ## Global Constraints
 
 - **The LLM never restates a number.** Strikes, premiums, and max loss are rendered from the stored document. The model emits an id and a verdict.
