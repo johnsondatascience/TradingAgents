@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 
 import tradingagents.default_config as default_config_module
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_config():
+    """Put DEFAULT_CONFIG back after each test in this module.
+
+    Every test here reloads default_config to re-evaluate DEFAULT_CONFIG, and
+    a reload is permanent in a way the env changes are not: monkeypatch
+    restores the environment at teardown, but nothing puts the module back, so
+    the last test's env-derived values stay in DEFAULT_CONFIG for the rest of
+    the session. Any later fixture doing set_config(deepcopy(DEFAULT_CONFIG))
+    then inherits them.
+
+    That is not hypothetical. Without this, running
+    test_gexter_candidate_keys_coerce_from_env before
+    tests/test_market_structure_state.py leaves gexter_candidates False, and
+    the market-structure node is asserted to request candidates it no longer
+    asks for -- a failure in a different file, about a key that test never
+    mentions. The full suite happened to order around it; a -k selection did
+    not.
+
+    The env is cleared explicitly rather than leaning on monkeypatch having
+    already unwound, so the reload sees a clean environment whichever order
+    the two finalizers run in.
+    """
+    saved = {k: os.environ.get(k) for k in default_config_module._ENV_OVERRIDES}
+    yield
+    for key in default_config_module._ENV_OVERRIDES:
+        os.environ.pop(key, None)
+    try:
+        importlib.reload(default_config_module)
+    finally:
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
 
 
 def _reload_with_env(monkeypatch, **overrides):
