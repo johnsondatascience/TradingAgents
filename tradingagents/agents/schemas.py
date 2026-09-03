@@ -170,7 +170,7 @@ def render_risk_context(document) -> str:
     if not document:
         return ""
     usable = []
-    for symbol, entry in ((document.get("symbols") or {})).items():
+    for symbol, entry in (document.get("symbols") or {}).items():
         # Prefer the real-time view; fall back to stale when no model
         # artifact was available, which is GEXter's documented degraded mode.
         view = (entry or {}).get("nowcast") or (entry or {}).get("stale")
