@@ -148,6 +148,69 @@ def find_candidate(document, candidate_id):
     return None
 
 
+def _regime_headline(view) -> str:
+    """"REGIME (strength, confidence NN%)", degrading around missing parts."""
+    headline = str(view.get("regime") or "unknown").upper()
+    qualifiers = []
+    if view.get("strength"):
+        qualifiers.append(str(view["strength"]))
+    confidence = view.get("confidence")
+    if confidence is not None:
+        qualifiers.append(f"confidence {confidence:.0%}")
+    return headline + (f" ({', '.join(qualifiers)})" if qualifiers else "")
+
+
+def render_risk_context(document) -> str:
+    """GEXter regime context for the risk debators, or "" when unavailable.
+
+    Returning "" rather than a placeholder is what keeps every equity run,
+    every ticker outside the S&P complex, and every install without GEXter
+    byte-identical to upstream: the caller appends this unconditionally.
+    """
+    if not document:
+        return ""
+    usable = []
+    for symbol, entry in ((document.get("symbols") or {})).items():
+        # Prefer the real-time view; fall back to stale when no model
+        # artifact was available, which is GEXter's documented degraded mode.
+        view = (entry or {}).get("nowcast") or (entry or {}).get("stale")
+        if view:
+            usable.append((symbol, entry, view))
+    if not usable:
+        return ""
+
+    trading_day = document.get("trading_day")
+    lines = [
+        "",
+        "",
+        "GEXTER MARKET-STRUCTURE CONTEXT (advisory)",
+        "",
+        "Index options positioning for the S&P complex"
+        + (f" on {trading_day}" if trading_day else "")
+        + ". This describes where dealer gamma sits and what it implies for "
+        "volatility and position sizing. It is NOT a directional forecast: "
+        "weigh it as one input and argue against it where the rest of the "
+        "evidence warrants.",
+    ]
+    for symbol, entry, view in usable:
+        lines.append("")
+        lines.append(f"- {symbol}: {_regime_headline(view)}")
+        multiplier = view.get("risk_adjustment")
+        if multiplier is not None:
+            lines.append(
+                f"  Suggested position-size multiplier: {multiplier} "
+                "(GEXter's assessment, not a cap)")
+        if view.get("trade_bias"):
+            lines.append(f"  Structural bias: {view['trade_bias']}")
+        if view.get("interpretation"):
+            lines.append(f"  GEXter's read: {view['interpretation']}")
+        if entry.get("regime_divergence"):
+            lines.append(
+                "  Real-time open interest has shifted the regime away from "
+                "the prior close, so this reading is less settled than usual.")
+    return "\n".join(lines)
+
+
 class TraderProposal(BaseModel):
     """Structured transaction proposal produced by the Trader.
 
