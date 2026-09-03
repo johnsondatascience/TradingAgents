@@ -19,14 +19,20 @@ from tradingagents.agents.risk_mgmt.neutral_debator import create_neutral_debato
 from tradingagents.agents.schemas import render_risk_context
 
 
-def _view(regime="compression", bias="sell_premium", multiplier=1.0):
+def _view(regime="compression", bias="sell_premium", multiplier=1.0, net_gex_bn=1.05):
     return {
         "regime": regime,
         "strength": "moderate",
         "confidence": 0.72,
         "trade_bias": bias,
         "risk_adjustment": multiplier,
-        "interpretation": "dealers long gamma, mean reversion favoured",
+        "net_gex_bn": net_gex_bn,
+        # Verbatim from production. GEXter writes this field for a human
+        # reading a report, so every regime's text ends in a trading
+        # imperative -- which is exactly what must not reach the debators.
+        "interpretation": (f"{regime.upper()}: Net GEX ${net_gex_bn}B "
+                           "(dealers long gamma) | Mean reversion expected - "
+                           "sell extremes, fade moves"),
     }
 
 
@@ -60,7 +66,23 @@ def test_regime_and_multiplier_reach_the_debators():
     assert "COMPRESSION" in out
     assert "0.5" in out
     assert "sell_premium" in out
-    assert "dealers long gamma" in out
+
+
+def test_directional_imperatives_never_reach_the_debators():
+    """GEXter's interpretation prose is written to instruct a human trader.
+
+    Passing it through would contradict the block's own "not a directional
+    forecast" framing three lines above it.
+    """
+    out = render_risk_context(_document())
+    assert "fade moves" not in out
+    assert "sell extremes" not in out
+    assert "Mean reversion expected" not in out
+
+
+def test_net_gex_is_surfaced_in_place_of_the_prose():
+    # The factual number the interpretation was derived from, without the verb.
+    assert "1.05" in render_risk_context(_document())
 
 
 def test_context_is_framed_as_advisory_not_binding():

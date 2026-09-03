@@ -201,9 +201,17 @@ def render_risk_context(document) -> str:
                 f"  Suggested position-size multiplier: {multiplier} "
                 "(GEXter's assessment, not a cap)")
         if view.get("trade_bias"):
+            # A volatility stance (long/short premium), not a price direction.
             lines.append(f"  Structural bias: {view['trade_bias']}")
-        if view.get("interpretation"):
-            lines.append(f"  GEXter's read: {view['interpretation']}")
+        net_gex = view.get("net_gex_bn")
+        if net_gex is not None:
+            lines.append(f"  Net GEX: {net_gex:+.2f}Bn")
+        # The document's `interpretation` is deliberately NOT passed through.
+        # GEXter writes it for a human reading a report, so every regime's
+        # text ends in a trading imperative ("ride momentum", "fade moves").
+        # Handing that to three LLMs would contradict the "not a directional
+        # forecast" framing above, and the regime plus net GEX already carry
+        # the same information without the verb.
         if entry.get("regime_divergence"):
             lines.append(
                 "  Real-time open interest has shifted the regime away from "
